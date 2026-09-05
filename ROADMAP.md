@@ -36,20 +36,20 @@ senza-wasm：把 llm-harness 内核（loop / 流式 / 工具 / 断路器）以 W
 - **真 key 路径必坏**（同上）——`stream_timeout_ms` 真 key 实测
   顺延到 M2，M1 落地后真 key 才有测试意义。
 
-## M1 — 会话核心 + 测试基建（当前，spec 已批准）
+## M1 — 会话核心 + 测试基建（已完成，待推送 + 上游 wasm 修复合入）
 
 spec：`docs/superpowers/specs/2026-09-05-senza-wasm-session-core-design.md`
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| mock script（text / tool_use / rate_limit_error 序列） | ⬜ | spec §3.3；复用内核 `MockResponse`，无上游改动 |
-| 对话连续性（history + [user_msg] 续接，增量合并，busy 守护） | ⬜ | spec §3.1；修复 prompt 文本注入 bug |
-| exportSession / importSession / clearSession + 代次计数 | ⬜ | spec §3.2；宿主持久化，门面自有 JSON 契约 |
-| Error→AgentEnd 事件循环修正 | ⬜ | spec §3.1；break 条件只认 AgentEnd |
-| call_id 语义与 Python SDK 复查 | ⬜ | spec §3.4；判定标准：事件字段名以 Python SDK 为准 |
-| 多轮工具冒烟（pump + JsTool 路径 + 反例） | ⬜ | spec §4；`tests/node_multi_turn.mjs` |
-| 浏览器真机冒烟（headless Chromium） | ⬜ | spec §4；手动门，不进 CI |
-| GitHub 远端仓库 + CI 首跑 | ⬜ | 前提项；本地提交待推送 |
+| mock script（text / tool_use / rate_limit_error 序列） | ✅ | spec §3.3；复用内核 `MockResponse`，无上游改动 |
+| 对话连续性（history + [user_msg] 续接，增量合并，busy 守护） | ✅ | spec §3.1；修复 prompt 文本注入 bug（commit b947cdc） |
+| exportSession / importSession / clearSession + 代次计数 | ✅ | spec §3.2；宿主持久化，门面自有 JSON 契约（commit 1946260） |
+| Error→AgentEnd 事件循环修正 | ✅ | spec §3.1；break 条件只认 AgentEnd |
+| call_id 语义与 Python SDK 复查 | ✅ | spec §3.4 已结案：保持 `tool_use_id`；附带修复 v0.1 pump 通道 key 错位 bug |
+| 多轮工具冒烟（pump + JsTool 路径 + 反例） | ✅ | spec §4；`tests/node_multi_turn.mjs` 进 CI（commit 8a6c3b3） |
+| 浏览器真机冒烟（headless Chromium） | ✅ | spec §4；手动门，不进 CI；Edge 152 实测 PASS，`--target web`（commit b6e6955） |
+| GitHub 远端仓库 + CI 首跑 | ⬜ | 前提项；本地提交待推送（含 `fix/wasm-tool-progress-spawn` 上游修复合入后重 pin） |
 
 ## M2 — config 透传 + 成本 + npm 包（M1 后）
 
