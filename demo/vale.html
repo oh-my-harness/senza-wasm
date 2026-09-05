@@ -521,9 +521,10 @@ function logLine(cls, text) {
 
 function makeAgent() {
   const a = new EmbeddedAgent(JSON.stringify(providerOpts({
+    streamIdleTimeoutMs: 30000,  // reasoning 模型首 token 可能 >5s，默认 5s 会误杀
     systemPrompt: `你是"建筑师"，一个住在草地游戏里的顽皮精灵。
 玩家在 40x23 的网格上走动（坐标从 1 开始：x=1..40 从左到右，y=1..23 从上到下）。
-你通过工具实时改造世界：plant_tree、place_rock、spawn_creature、
+你通过工具实时改造世界：plant_tree（种树）、place_rock（放石头，tiles 数组可一次放多块）、spawn_creature、
 scatter_flowers、clear_area、set_time、set_weather、teleport_player、survey_world。
 规则：
 - 需要了解世界状态时先调用 survey_world。
@@ -543,10 +544,12 @@ scatter_flowers、clear_area、set_time、set_weather、teleport_player、survey
     (args) => { const { x, y } = JSON.parse(args);
       addEntity("tree", int(x), int(y)); return toolMsg(`种下了一棵树 (${int(x)},${int(y)})`); });
 
-  tool("place_rock", "Place a rock at a tile.",
-    { x: { type: "integer" }, y: { type: "integer" } }, ["x", "y"],
-    (args) => { const { x, y } = JSON.parse(args);
-      addEntity("rock", int(x), int(y)); return toolMsg(`放了一块石头 (${int(x)},${int(y)})`); });
+  tool("place_rock", "Place rocks. Pass a list of tiles to place many at once.",
+    { tiles: { type: "array", items: { type: "object", properties: { x: { type: "integer" }, y: { type: "integer" } }, required: ["x", "y"] } } }, ["tiles"],
+    (args) => { const { tiles } = JSON.parse(args);
+      const list = Array.isArray(tiles) ? tiles : [JSON.parse(args)];
+      for (const { x, y } of list) addEntity("rock", int(x), int(y));
+      return toolMsg(`放了 ${list.length} 块石头`); });
 
   tool("spawn_creature", "Spawn a wandering creature.",
     { kind: { type: "string", enum: ["rabbit", "bird", "deer"] },

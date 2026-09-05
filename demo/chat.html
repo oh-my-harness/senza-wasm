@@ -338,6 +338,7 @@ let streamBuf = "";
 
 function makeAgent() {
   const opts = providerOpts({
+    streamIdleTimeoutMs: 30000,  // reasoning 模型首 token 可能 >5s
     systemPrompt: "你是一个简洁的中文助手。需要当前时间就调 fetchTime 工具；要保存内容必须调 writeNote 工具（会经用户审批）。",
   });
   const a = new EmbeddedAgent(JSON.stringify(opts));
