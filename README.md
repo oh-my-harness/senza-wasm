@@ -126,6 +126,17 @@ agent.clearSession();                          // 清空；会杀死在途写回
 loop 仍会紧随其后以 `agent_end` 收尾（内核契约）——半轮内容不会
 被合并（"宁可丢半轮，不可脏历史"）。
 
+## 在线 demo（GitHub Pages）
+
+推到 GitHub 后启用 Pages（Settings → Pages → Source 选 **GitHub Actions**），
+`.github/workflows/pages.yml` 会在每次 main 变更时构建 wasm 并部署到：
+
+    https://<user>.github.io/senza-wasm/demo/
+
+纯静态（HTML + JS + wasm），无后端；API key 只在访客自己的浏览器
+内存里，不经过任何服务器。本地跑同款：`wasm-pack build --target
+web --out-dir pkg-web && python3 -m http.server` 后开 `demo/index.html`。
+
 ## 测试门面（mock provider）
 
 `provider: "mock"` 接受 `mockScript` 数组（仅 constructor JSON，
