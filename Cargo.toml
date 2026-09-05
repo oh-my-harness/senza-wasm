@@ -1,0 +1,30 @@
+[package]
+name = "senza-wasm"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+llm-harness-loop = { git = "https://github.com/oh-my-harness/llm-harness-runtime", rev = "358af9f477d31c57522d32bcb68c58cff6293227", features = ["test-utils"] }
+llm-harness-types = { git = "https://github.com/oh-my-harness/llm-harness-runtime", rev = "358af9f477d31c57522d32bcb68c58cff6293227" }
+llm_adapter = { git = "https://github.com/oh-my-harness/llm-api-adapter", rev = "33d34033cbc999667309f533bec198ce411efdc7" }
+parking_lot = "0.12"
+tokio = { version = "1", default-features = false, features = ["sync"] }
+tokio-util = { version = "0.7", default-features = false }
+wasm-bindgen = "0.2"
+uuid = { version = "1", features = ["v4", "js"] }
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+futures-timer = { version = "3", default-features = false, features = ["wasm-bindgen"] }
+console_error_panic_hook = "0.1"
+chrono = { version = "0.4", features = ["wasmbind"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
