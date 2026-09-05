@@ -250,16 +250,33 @@ function makeGameAgent(seat) {
   const p = players[seat];
   const a = new EmbeddedAgent(JSON.stringify(providerOpts({
     streamIdleTimeoutMs: 30000,
-    systemPrompt: `你在玩「谁是卧底」。你的代号是「${p.name}」。
-你的词是「${p.word}」。${AGENT_PERSONA[seat] ?? ""}
+    systemPrompt: `你在玩「谁是卧底」（4 人局：3 个 AI + 1 个人类玩家）。
+你的代号是「${p.name}」。你的词是「${p.word}」。${AGENT_PERSONA[seat] ?? ""}
 
-规则：
-- 每轮用一句中文描述你的词：可以描述特征、用途、联想，但不能直接说出词本身。
-- 你的目标是让大家觉得你是平民；如果你发现别人的描述和你的词对不上，
-  投票时把票投给最可疑的人。
-- 轮到你发言时必须调用 speak 工具，你的描述放在 statement 参数里。
-- 投票环节必须调用 vote 工具，target 填玩家代号。
-- 语气自然，像人在玩游戏，不要输出分析报告。`,
+【核心规则】你不知道自己是平民还是卧底——这是游戏精髓。
+4 人里有 1 个卧底，卧底的词和平民不同但相近。你只能靠听
+别人的描述来推断自己的处境。
+
+【发言策略】
+- 绝对不能说出你的词，也不能说出词里的任何一个字。
+- 第一轮发言必须抽象宽泛，只给"类别级"信息（词是"苹果"
+  就说"一种水果"）。说太具体：你是平民就是泄题，
+  你是卧底就是暴露。
+- 听完前面的发言后判断：
+  · 大家的描述和你的词对得上 → 你多半是平民。在别人描述的
+    基础上补充一个新细节，前后保持一致，别重复别人说过的话。
+  · 大家的描述和你的词对不上 → 你多半是卧底！这时千万别
+    描述你自己的词，要贴着大家描述的共性模糊地说
+    （大家都说甜，你就说"是一种甜味的吃的"）。混过去就是赢。
+- 像人在玩游戏聊天，不要输出分析报告。
+
+【投票策略】
+- 投给描述方向和大多数人明显不符的人，或一直含糊跟风的人。
+- 平民要把卧底投出去；卧底撑到只剩 2 人即胜。
+
+【工具契约】
+- 轮到你发言时必须调用 speak 工具，描述放在 statement 参数里。
+- 投票环节必须调用 vote 工具，target 填玩家代号。`,
   })));
 
   a.registerTool("speak", "轮到你发言：提交你的一句话描述", JSON.stringify(
@@ -355,8 +372,14 @@ async function nextSpeakerStep() {
 
   const ctx = transcriptText();
   const prompt = st.round === 1 && !ctx
-    ? "游戏开始，你是第一个发言的。调用 speak 工具，用一句话描述你的词。"
-    : `目前场上的发言：\n${ctx}\n\n轮到你了。调用 speak 工具，用一句话描述你的词。`;
+    ? `游戏开始，你是第一个发言的。记住要抽象宽泛（类别级），
+调 speak 工具提交一句话描述。`
+    : `目前场上的发言（第 ${st.round} 轮）：
+${ctx}
+
+先判断：这些描述和你的词对得上吗？按你的处境选择策略
+（对得上→补充新细节；对不上→贴着共性模糊说）。
+不要重复任何人说过的话。调 speak 工具提交一句话描述。`;
   agents[seat].prompt(prompt);
 
   pumpAgent(seat, (name, args) => {
@@ -407,8 +430,11 @@ function enterVoting() {
     const seat = p.seat;
     const others = alive.filter((x) => x.seat !== seat)
       .map((x) => x.name).join("、");
-    agents[seat].prompt(`发言结束。场上发言：\n${transcriptText()}\n\n` +
-      `现在投票。可投：${others}。调用 vote 工具，target 填玩家代号。`);
+    agents[seat].prompt(`发言结束。场上发言（第 ${st.round} 轮）：
+${transcriptText()}
+
+投票：谁的描述方向和大多数人明显不符，或一直含糊跟风？
+可投：${others}。调 vote 工具，target 填玩家代号。`);
     pumpAgent(seat, (name, args) => {
       if (name === "vote") {
         const target = args?.target;
