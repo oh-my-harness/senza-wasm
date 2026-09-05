@@ -599,7 +599,11 @@ async function pump() {
   for (;;) {
     await new Promise((r) => setTimeout(r, 40));
     const lines = agent.poll();
-    for (const line of lines) handleEvent(JSON.parse(line));
+    try {
+      for (const line of lines) handleEvent(JSON.parse(line));
+    } catch (err) {
+      console.error("handleEvent failed:", err); // 单个事件处理失败不杀死 pump
+    }
     if (!lines.length && !agentActive) break;
   }
 }
@@ -607,7 +611,11 @@ async function pump() {
 $("inputrow").onsubmit = (e) => {
   e.preventDefault();
   const text = $("chat").value.trim();
-  if (!text || agentActive) return;
+  if (!text) return;
+  if (agent && agent.isRunning()) {   // wasm 侧真值：不受事件消费时序影响
+    logLine("err", "上一轮还在进行中，稍等一下…");
+    return;
+  }
   try {
     if (!agent) agent = makeAgent();
   } catch (err) { logLine("err", String(err.message ?? err)); return; }
@@ -616,7 +624,6 @@ $("inputrow").onsubmit = (e) => {
   agent.prompt(text);
   pump();
 };
-$("send").onclick = () => $("inputrow").requestSubmit();
 $("chat").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault(); $("inputrow").requestSubmit();
