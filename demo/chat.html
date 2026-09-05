@@ -237,6 +237,7 @@ function inlineMd(s) {
 }
 // 行内数学：$..$ 与 \(..\)（KaTeX 不在或渲染失败 → 原样返回）
 function renderInlineMath(html) {
+  if (typeof katex === "undefined") return html;  // KaTeX 未就绪：留原文，定稿时重渲染
   return html.replace(
     /(\$\$[\s\S]+?\$\$)|(\$[^\s$][^\n$]*?\$)|(\\\(([\s\S]+?)\\\))|(\\\[([\s\S]+?)\\\])/g,
     (m, dd, d, pl, plainP, br, plainB) => {
@@ -420,8 +421,19 @@ function handleEvent(ev) {
     }
     case "message_end":
       if (currentAssistantBody) {
-        currentAssistantBody.classList.add("md");
-        currentAssistantBody.innerHTML = mdToHtml(streamBuf);
+        const finalize = () => {
+          currentAssistantBody.classList.add("md");
+          currentAssistantBody.innerHTML = mdToHtml(streamBuf);
+        };
+        if (typeof katex !== "undefined") finalize();
+        else { // KaTeX 还在路上：等加载完再定稿（3s 超时兜底）
+          const t = setInterval(() => {
+            if (typeof katex !== "undefined" || (Date.now() - _t0 > 3000)) {
+              clearInterval(t); finalize();
+            }
+          }, 100);
+          const _t0 = Date.now();
+        }
         currentAssistantBody = null;
       }
       break;
