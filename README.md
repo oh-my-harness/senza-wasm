@@ -131,7 +131,7 @@ loop 仍会紧随其后以 `agent_end` 收尾（内核契约）——半轮内�
 推到 GitHub 后启用 Pages（Settings → Pages → Source 选 **GitHub Actions**），
 `.github/workflows/pages.yml` 会在每次 main 变更时构建 wasm 并部署到：
 
-    https://<user>.github.io/senza-wasm/demo/
+    https://<user>.github.io/senza-wasm/demo/  （入口页，选 demo 玩）
 
 纯静态（HTML + JS + wasm），无后端；API key 只在访客自己的浏览器
 内存里，不经过任何服务器。本地跑同款：`wasm-pack build --target

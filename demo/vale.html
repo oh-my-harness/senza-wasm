@@ -1,0 +1,637 @@
+<!doctype html>
+<!--
+  Agent Vale · web — senza-wasm 复刻升级版（原版：pygame + Senza Python SDK）
+
+  同一 embed 模型：渲染 60FPS 永不阻塞，agent 是组件不是主人。
+  pygame 版要 daemon 线程 + queue.Queue + 每帧 poll 才能做到的事，
+  浏览器事件循环天生就是：prompt() 立即返回，poll() 增量取事件。
+
+  精致化（超出原版的部分）：
+  - 天空渐变随时间连续变化 + 星空（夜晚）+ 云影（白天）
+  - 树冠随各自相位摇曳；花草轻微摆动
+  - 生物弹跳步态 + 拖尾阴影
+  - 雨滴溅落粒子 + 地面涟漪
+  - 玩家辉光呼吸 + 移动挤压形变（squash & stretch）
+  - 聊天面板毛玻璃 + 消息淡入
+  - IME / CJK 输入原生（原版 pygame 要专门处理 TEXTINPUT 事件）
+
+  Run:
+    wasm-pack build --target web --out-dir pkg-web
+    python3 -m http.server 8931    # repo root
+    open http://localhost:8931/demo/vale.html
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="data:," />
+<title>Agent Vale · web</title>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; overflow: hidden; background: #0a0d14;
+    font: 14px/1.6 -apple-system, "PingFang SC", sans-serif; color: #e8ebf0; }
+  #stage { position: fixed; inset: 0; display: flex; align-items: center;
+    justify-content: center; }
+  canvas { image-rendering: auto; box-shadow: 0 24px 80px rgba(0,0,0,.55);
+    border-radius: 4px; }
+
+  /* ---- 聊天控制台：毛玻璃浮层 ---- */
+  #console { position: fixed; left: 24px; bottom: 24px; width: 420px;
+    max-width: calc(100vw - 48px);
+    background: rgba(13, 17, 26, 0.72);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border: 1px solid rgba(255,255,255,0.09); border-radius: 14px;
+    display: flex; flex-direction: column;
+    max-height: min(60vh, 520px); transition: transform .28s, opacity .28s; }
+  #console.hidden { transform: translateY(12px); opacity: 0; pointer-events: none; }
+  #log { flex: 1; overflow-y: auto; padding: 12px 14px; min-height: 60px;
+    scrollbar-width: thin; }
+  .line { margin: 3px 0; font-size: 13px; animation: fadein .25s ease-out; }
+  .line.you { color: #8ab4f8; }
+  .line.builder { color: #d7e3c8; }
+  .line.tool { color: #7fa88a; font-size: 12px; }
+  .line.err { color: #e58c8c; }
+  .line .caret { display: inline-block; width: .5em; height: 1em;
+    background: #7fa88a; vertical-align: text-bottom;
+    animation: blink 1s step-end infinite; }
+  @keyframes fadein { from { opacity: 0; transform: translateY(4px); } }
+  @keyframes blink { 50% { opacity: 0; } }
+  #inputrow { display: flex; gap: 8px; padding: 10px 12px;
+    border-top: 1px solid rgba(255,255,255,0.08); }
+  #chat { flex: 1; background: transparent; border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 8px; color: #e8ebf0; font: inherit; padding: 8px 10px;
+    resize: none; height: 40px; outline: none; }
+  #chat:focus { border-color: rgba(138,180,248,0.55); }
+  #send { background: #2d6cdf; border: 0; border-radius: 8px; color: #fff;
+    padding: 0 14px; cursor: pointer; font: inherit; }
+  #send:disabled { background: #3a4152; cursor: not-allowed; }
+
+  /* ---- 顶栏状态 ---- */
+  #hud { position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 22px; align-items: center;
+    background: rgba(13,17,26,0.72); backdrop-filter: blur(14px);
+    border: 1px solid rgba(255,255,255,0.09); border-radius: 999px;
+    padding: 8px 20px; font-size: 13px; color: #b8c0cc;
+    user-select: none; }
+  #hud b { color: #e8ebf0; font-weight: 600; }
+  #busy { width: 9px; height: 9px; border-radius: 50%; background: #4a5262;
+    transition: background .2s; }
+  #busy.on { background: #f5c76b; animation: pulse 1.1s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 5px rgba(245,199,107,0.25); } }
+
+  /* ---- 设置抽屉 ---- */
+  #gear { position: fixed; top: 16px; right: 16px; width: 38px; height: 38px;
+    border-radius: 50%; border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(13,17,26,0.72); backdrop-filter: blur(14px);
+    color: #b8c0cc; cursor: pointer; font-size: 17px; line-height: 36px;
+    text-align: center; user-select: none; }
+  #gear:hover { color: #fff; }
+  #settings { position: fixed; top: 64px; right: 16px; width: 320px;
+    background: rgba(13,17,26,0.86); backdrop-filter: blur(14px);
+    border: 1px solid rgba(255,255,255,0.09); border-radius: 14px;
+    padding: 14px 16px 16px; display: none; }
+  #settings.open { display: block; }
+  #settings label { display: block; font-size: 12px; color: #9aa3b0;
+    margin: 10px 0 3px; }
+  #settings select, #settings input { width: 100%; font: inherit; font-size: 13px;
+    background: #0a0d14; color: #e8ebf0; border: 1px solid #323949;
+    border-radius: 6px; padding: 6px 8px; }
+  #settings p.note { font-size: 11px; color: #7d8590; margin: 10px 0 0;
+    line-height: 1.5; }
+  #hint { position: fixed; bottom: 24px; right: 24px; font-size: 12px;
+    color: rgba(184,192,204,0.65); user-select: none; text-align: right;
+    line-height: 1.7; pointer-events: none; z-index: -1; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="game"></canvas></div>
+
+<div id="hud">
+  <span id="busy"></span>
+  <span>⛵ <b id="stat-pop">0</b> 生灵</span>
+  <span>🕒 <b id="stat-time">10:00</b></span>
+  <span id="stat-weather">☀️ 晴</span>
+  <span style="color:#7d8590">Enter 聊天</span>
+</div>
+<a href="index.html" title="demos"
+   style="position:fixed;top:16px;right:62px;width:38px;height:38px;border-radius:50%;
+   border:1px solid rgba(255,255,255,0.12);background:rgba(13,17,26,0.72);
+   backdrop-filter:blur(14px);color:#b8c0cc;text-decoration:none;font-size:15px;
+   line-height:36px;text-align:center">←</a>
+<div id="gear" title="设置">⚙</div>
+<div id="settings">
+  <label>预设（OpenAI 兼容端点）</label>
+  <select id="preset">
+    <option value="https://api.openai.com/v1" selected>OpenAI 官方</option>
+    <option value="https://api.deepseek.com/v1">DeepSeek</option>
+    <option value="https://api.moonshot.cn/v1">Moonshot (Kimi)</option>
+    <option value="https://ark.cn-beijing.volces.com/api/v3">火山方舟</option>
+    <option value="https://open.bigmodel.cn/api/paas/v4">智谱 GLM</option>
+    <option value="http://localhost:11434/v1">Ollama 本地</option>
+    <option value="">自定义…</option>
+  </select>
+  <label>API base URL</label>
+  <input id="baseurl" placeholder="https://api.openai.com/v1" />
+  <label>API key（仅存于页面内存）</label>
+  <input id="apikey" type="password" placeholder="sk-…" />
+  <label>model</label>
+  <input id="model" value="gpt-4o-mini" />
+  <p class="note">key 存你浏览器的 localStorage，全 demo 共用；不经任何服务器。
+  浏览器直连需端点允许 CORS（官方 API 均可）。</p>
+</div>
+
+<div id="console">
+  <div id="log"></div>
+  <form id="inputrow">
+    <textarea id="chat" placeholder="对建筑师说…（Enter 发送）"></textarea>
+    <button id="send" type="submit">发送</button>
+  </form>
+</div>
+
+<div id="hint">WASD / 方向键移动 · Enter 开聊天 · Esc 关聊天<br/>
+试试：在我旁边种三棵树 · 让午夜下起雨 · 勘察一下这个世界</div>
+
+<script type="module">
+import init, { EmbeddedAgent } from "../pkg-web/senza_wasm.js";
+import { bindSettings, providerOpts } from "./common.js";
+const $ = (id) => document.getElementById(id);
+
+// ======================= World（对齐 senza-vale world.py）=======================
+const COLS = 40, ROWS = 23, TILE = 32;
+const W = COLS * TILE, H = ROWS * TILE;
+const CREATURE_TYPES = { rabbit: 3.0, bird: 5.0, deer: 2.0 }; // tiles/sec
+const KIND_CN = { rabbit: "兔子", bird: "鸟", deer: "鹿" };
+
+let nextId = 1;
+const world = {
+  time: 10.0, weather: "clear",
+  entities: [],   // {id, kind:"tree"|"rock"|"flower", x, y, phase}
+  creatures: [],  // {id, x, y, type, speed, dx, dy, timer, hop}
+  rain: [],       // splash particles
+  stars: Array.from({ length: 90 }, () => ({
+    x: Math.random() * W, y: Math.random() * H * 0.9,
+    r: Math.random() * 1.3 + 0.4, tw: Math.random() * Math.PI * 2 })),
+  clouds: Array.from({ length: 5 }, () => ({
+    x: Math.random() * W, y: Math.random() * H * 0.4 + 30,
+    r: 60 + Math.random() * 90, a: 0.05 + Math.random() * 0.07 })),
+};
+
+const player = { x: 20, y: 12, dx: 0, dy: 0, squash: 0, glow: 0 };
+
+function addEntity(kind, x, y, creatureType) {
+  if (!(x >= 1 && x <= COLS && y >= 1 && y <= ROWS))
+    throw new Error(`(${x},${y}) 超出 1 起始的 ${COLS}×${ROWS} 网格`);
+  if (kind === "creature") {
+    const c = { id: nextId++, x, y, type: creatureType,
+      speed: CREATURE_TYPES[creatureType], dx: 0, dy: 0,
+      timer: 0.5 + Math.random() * 1.5, hop: Math.random() * Math.PI * 2 };
+    world.creatures.push(c); return c;
+  }
+  const e = { id: nextId++, kind, x, y, phase: Math.random() * Math.PI * 2 };
+  world.entities.push(e); return e;
+}
+
+function removeInRadius(x, y, radius) {
+  let removed = 0;
+  world.entities = world.entities.filter((e) => {
+    const hit = Math.max(Math.abs(e.x - x), Math.abs(e.y - y)) <= radius;
+    if (hit) removed++; return !hit;
+  });
+  world.creatures = world.creatures.filter(
+    (c) => Math.max(Math.abs(c.x - x), Math.abs(c.y - y)) > radius);
+  return removed;
+}
+
+function entityCounts() {
+  const n = { tree: 0, rock: 0, flower: 0, creature: world.creatures.length };
+  for (const e of world.entities) n[e.kind]++;
+  return n;
+}
+
+function survey() {
+  const n = entityCounts();
+  return `trees=${n.tree} rocks=${n.rock} flowers=${n.flower} ` +
+    `creatures=${n.creature} time=${world.time.toFixed(1)}h ` +
+    `weather=${world.weather} player=(${Math.round(player.x)},${Math.round(player.y)})`;
+}
+
+function daylight() {
+  return Math.max(0, Math.sin((world.time - 6) / 12 * Math.PI));
+}
+
+// 初始布景：几棵树、石头、花，让世界开局就不空
+(function seedScene() {
+  const spots = [[5,4],[36,5],[8,19],[33,18],[14,7],[27,12],[3,14],[38,21],[18,3],[24,20]];
+  for (const [x, y] of spots) addEntity("tree", x, y);
+  addEntity("rock", 12, 12); addEntity("rock", 30, 8); addEntity("rock", 20, 21);
+  for (let i = 0; i < 14; i++)
+    addEntity("flower", 1 + Math.floor(Math.random() * COLS),
+                      1 + Math.floor(Math.random() * ROWS));
+})();
+
+// ======================= 渲染 =======================
+const canvas = $("game"), ctx = canvas.getContext("2d");
+canvas.width = W; canvas.height = H;
+
+// scale to fit window
+function fit() {
+  const s = Math.min(innerWidth / W, (innerHeight - 8) / H);
+  canvas.style.width = `${W * s}px`; canvas.style.height = `${H * s}px`;
+}
+addEventListener("resize", fit); fit();
+
+const px = (gx, gy) => [(gx - 1) * TILE, (gy - 1) * TILE];
+const t = () => performance.now() / 1000;
+
+// 天空色：按 daylight 在夜/晨/昼间插值
+function skyStops() {
+  const d = daylight();
+  // night → dawn → day
+  const night = [[6, 9, 22], [10, 14, 34]];
+  const dawn = [[64, 52, 92], [180, 120, 110]];
+  const day = [[132, 196, 220], [96, 158, 96]];
+  const mix = (a, b, k) => a.map((v, i) => Math.round(v + (b[i] - v) * k));
+  let top, bottom;
+  if (d < 0.25) { const k = d / 0.25; top = mix(night[0], dawn[0], k); bottom = mix(night[1], dawn[1], k); }
+  else { const k = Math.min(1, (d - 0.25) / 0.5); top = mix(dawn[0], day[0], k); bottom = mix(dawn[1], day[1], k); }
+  return [top, bottom];
+}
+
+function draw(now) {
+  const d = daylight();
+  // 天空渐变
+  const [top, bottom] = skyStops();
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, `rgb(${top})`); g.addColorStop(1, `rgb(${bottom})`);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  // 星星（夜）
+  if (d < 0.45) {
+    ctx.globalAlpha = (0.45 - d) / 0.45;
+    for (const s of world.stars) {
+      const tw = 0.5 + 0.5 * Math.sin(now * 1.7 + s.tw);
+      ctx.fillStyle = `rgba(230,238,255,${0.35 + tw * 0.6})`;
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 7); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+  // 云影（昼）
+  if (d > 0.3) {
+    ctx.globalAlpha = (d - 0.3) * 0.5;
+    for (const c of world.clouds) {
+      const cx = (c.x + now * 6) % (W + 240) - 120;
+      const rg = ctx.createRadialGradient(cx, c.y, 0, cx, c.y, c.r);
+      rg.addColorStop(0, `rgba(255,255,255,${c.a})`); rg.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.fillStyle = rg;
+      ctx.beginPath(); ctx.ellipse(cx, c.y, c.r, c.r * 0.35, 0, 0, 7); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // 草地棋盘
+  for (let gy = 1; gy <= ROWS; gy++)
+    for (let gx = 1; gx <= COLS; gx++) {
+      const shade = (gx + gy) % 2 ? 8 : 0;
+      ctx.fillStyle = `rgb(${86 - shade},${148 - shade},${82 - shade})`;
+      const [x, y] = px(gx, gy);
+      ctx.fillRect(x, y, TILE, TILE);
+    }
+
+  // 静态实体
+  for (const e of world.entities) {
+    const [x, y] = px(e.x, e.y);
+    if (e.kind === "tree") {
+      const sway = Math.sin(now * 1.1 + e.phase) * 1.8;
+      // 影
+      ctx.fillStyle = "rgba(0,0,0,0.18)";
+      ctx.beginPath(); ctx.ellipse(x + 16, y + 29, 13, 4, 0, 0, 7); ctx.fill();
+      // 干
+      ctx.fillStyle = "rgb(94,64,40)"; ctx.fillRect(x + 12, y + 16, 8, 14);
+      // 冠（三层圆，带摇曳）
+      ctx.fillStyle = "rgb(40,110,48)";
+      ctx.beginPath(); ctx.arc(x + 16 + sway * 0.6, y + 11, 13, 0, 7); ctx.fill();
+      ctx.fillStyle = "rgb(52,132,60)";
+      ctx.beginPath(); ctx.arc(x + 13 + sway, y + 8, 8, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.arc(x + 21 + sway, y + 9, 7, 0, 7); ctx.fill();
+    } else if (e.kind === "rock") {
+      ctx.fillStyle = "rgba(0,0,0,0.15)";
+      ctx.beginPath(); ctx.ellipse(x + 16, y + 27, 11, 3.5, 0, 0, 7); ctx.fill();
+      ctx.fillStyle = "rgb(128,128,132)";
+      ctx.beginPath(); ctx.arc(x + 16, y + 19, 10, 0, 7); ctx.fill();
+      ctx.fillStyle = "rgb(150,150,154)";
+      ctx.beginPath(); ctx.arc(x + 13, y + 16, 4.5, 0, 7); ctx.fill();
+    } else if (e.kind === "flower") {
+      const sway = Math.sin(now * 1.6 + e.phase) * 1.2;
+      ctx.strokeStyle = "rgb(70,120,66)"; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(x + 16, y + 20); ctx.lineTo(x + 16 + sway, y + 13); ctx.stroke();
+      ctx.fillStyle = `hsl(${(e.phase * 57) % 360},75%,68%)`;
+      for (let i = 0; i < 5; i++) {
+        const a = i / 5 * Math.PI * 2 + now * 0.2;
+        ctx.beginPath();
+        ctx.arc(x + 16 + sway + Math.cos(a) * 3, y + 12 + Math.sin(a) * 3, 2, 0, 7);
+        ctx.fill();
+      }
+      ctx.fillStyle = "rgb(240,210,80)";
+      ctx.beginPath(); ctx.arc(x + 16 + sway, y + 12, 1.8, 0, 7); ctx.fill();
+    }
+  }
+
+  // 生物：弹跳步态 + 阴影
+  for (const c of world.creatures) {
+    const [bx, by] = px(c.x, c.y);
+    const sizes = { rabbit: 5, bird: 4, deer: 7 };
+    const r = sizes[c.type];
+    const hop = Math.abs(Math.sin(c.hop)) * (c.type === "bird" ? 7 : c.type === "rabbit" ? 4 : 2);
+    ctx.fillStyle = "rgba(0,0,0,0.2)";
+    ctx.beginPath(); ctx.ellipse(bx + 16, by + 28, r * 1.2, 3, 0, 0, 7); ctx.fill();
+    const colors = { rabbit: "rgb(230,228,220)", bird: "rgb(70,120,200)", deer: "rgb(160,116,70)" };
+    ctx.fillStyle = colors[c.type];
+    ctx.beginPath(); ctx.arc(bx + 16, by + 16 - hop, r, 0, 7); ctx.fill();
+    if (c.type === "deer") { // 小角
+      ctx.strokeStyle = "rgb(120,86,50)"; ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(bx + 13, by + 12 - hop); ctx.lineTo(bx + 11, by + 7 - hop);
+      ctx.moveTo(bx + 19, by + 12 - hop); ctx.lineTo(bx + 21, by + 7 - hop);
+      ctx.stroke();
+    }
+  }
+
+  // 玩家：辉光呼吸 + 挤压形变
+  {
+    const [x, y] = px(player.x, player.y);
+    const cx = x + 16, cy = y + 16;
+    const glow = 12 + Math.sin(now * 2.2) * 4;
+    const rg = ctx.createRadialGradient(cx, cy, 2, cx, cy, glow + 10);
+    rg.addColorStop(0, "rgba(240,210,60,0.5)");
+    rg.addColorStop(1, "rgba(240,210,60,0)");
+    ctx.fillStyle = rg;
+    ctx.beginPath(); ctx.arc(cx, cy, glow + 10, 0, 7); ctx.fill();
+    ctx.fillStyle = "rgba(0,0,0,0.22)";
+    ctx.beginPath(); ctx.ellipse(cx, y + 29, 11, 3.5, 0, 0, 7); ctx.fill();
+    const sq = 1 + player.squash * 0.25, sv = 1 - player.squash * 0.2;
+    ctx.fillStyle = "rgb(240,210,60)";
+    ctx.beginPath(); ctx.ellipse(cx, cy, 10 * sq, 10 * sv, 0, 0, 7); ctx.fill();
+    ctx.strokeStyle = "rgb(60,50,20)"; ctx.lineWidth = 2;
+    ctx.stroke();
+    // 眼睛（朝向移动方向）
+    const ex = Math.sign(player.dx) * 2.5, ey = Math.sign(player.dy) * 2;
+    ctx.fillStyle = "rgb(50,42,18)";
+    ctx.beginPath(); ctx.arc(cx - 3 + ex, cy - 2 + ey, 1.6, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + 3 + ex, cy - 2 + ey, 1.6, 0, 7); ctx.fill();
+  }
+
+  // 雨：斜线雨滴 + 落地溅花
+  if (world.weather === "rain") {
+    if (world.rain.length < 130)
+      for (let i = 0; i < 6; i++)
+        world.rain.push({ x: Math.random() * (W + 60), y: -10 - Math.random() * 40,
+          vy: 320 + Math.random() * 200, splash: 0 });
+    ctx.strokeStyle = "rgba(170,200,230,0.55)"; ctx.lineWidth = 1;
+    for (const p of world.rain) {
+      if (p.splash > 0) {
+        p.splash -= dt;
+        ctx.strokeStyle = `rgba(170,200,230,${p.splash * 3})`;
+        ctx.beginPath();
+        ctx.ellipse(p.x, p.gy, (0.3 - p.splash) * 60, (0.3 - p.splash) * 16, 0, 0, 7);
+        ctx.stroke();
+        ctx.strokeStyle = "rgba(170,200,230,0.55)";
+      } else {
+        ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + 2.5, p.y + 9); ctx.stroke();
+      }
+    }
+  } else world.rain.length = 0;
+
+  // 昼夜 tint
+  const dark = 1 - d;
+  if (dark > 0.03) {
+    ctx.fillStyle = `rgba(10,14,40,${Math.min(0.62, 150 / 255 * dark)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+// ======================= 模拟循环（60FPS，永不阻塞）=======================
+let dt = 1 / 60;
+const keys = new Set();
+addEventListener("keydown", (e) => {
+  if (e.target === $("chat")) {                    // 输入框里：Enter/Escape 交给输入框处理
+    return;
+  }
+  if (e.key === "Enter") { toggleConsole(true); return; }
+  if (e.key === "Escape") { toggleConsole(false); return; }
+  keys.add(e.key.toLowerCase());
+});
+addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+
+function toggleConsole(open) {
+  $("console").classList.toggle("hidden", !open);
+  if (open) $("chat").focus(); else $("chat").blur();
+}
+
+function step(now) {
+  // player move
+  const sp = 6 * dt;
+  let dx = 0, dy = 0;
+  if (keys.has("a") || keys.has("arrowleft")) dx -= 1;
+  if (keys.has("d") || keys.has("arrowright")) dx += 1;
+  if (keys.has("w") || keys.has("arrowup")) dy -= 1;
+  if (keys.has("s") || keys.has("arrowdown")) dy += 1;
+  if (dx || dy) {
+    const inv = 1 / Math.hypot(dx, dy);
+    player.x = Math.min(Math.max(player.x + dx * inv * sp, 1), COLS);
+    player.y = Math.min(Math.max(player.y + dy * inv * sp, 1), ROWS);
+    player.dx = dx; player.dy = dy;
+    player.squash = Math.min(0.6, player.squash + dt * 4);
+  } else player.squash = Math.max(0, player.squash - dt * 5);
+
+  // creatures wander
+  for (const c of world.creatures) {
+    c.timer -= dt;
+    if (c.timer <= 0) {
+      c.timer = 1 + Math.random() * 2;
+      c.dx = [-1, 0, 0, 1][Math.floor(Math.random() * 4)];
+      c.dy = [-1, 0, 0, 1][Math.floor(Math.random() * 4)];
+    }
+    c.x = Math.min(Math.max(c.x + c.dx * c.speed * dt, 1), COLS);
+    c.y = Math.min(Math.max(c.y + c.dy * c.speed * dt, 1), ROWS);
+    c.hop += dt * (6 + c.speed * 2);
+  }
+
+  // rain advance
+  for (const p of world.rain) {
+    if (p.splash > 0) continue;
+    p.y += p.vy * dt; p.x -= 40 * dt;
+    if (p.y > H) { p.splash = 0.3; p.gy = Math.min(p.y, H - 2); }
+  }
+  world.rain = world.rain.filter((p) => p.splash === undefined || p.splash > 0 || p.y < H + 30);
+
+  // HUD
+  $("stat-pop").textContent = entityCounts().creature;
+  const hh = Math.floor(world.time) % 24, mm = Math.floor((world.time % 1) * 60);
+  $("stat-time").textContent = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+  $("stat-weather").textContent = world.weather === "rain" ? "🌧️ 雨" : "☀️ 晴";
+
+  draw(now);
+  requestAnimationFrame(step);
+}
+requestAnimationFrame(step);
+
+// ======================= Agent（senza-wasm embed）=======================
+await init();
+let agent = null, agentActive = false, builderLine = null;
+
+function logLine(cls, text) {
+  const div = document.createElement("div");
+  div.className = "line " + cls;
+  div.textContent = text;
+  $("log").appendChild(div);
+  $("log").scrollTop = $("log").scrollHeight;
+  return div;
+}
+
+function makeAgent() {
+  const a = new EmbeddedAgent(JSON.stringify(providerOpts({
+    systemPrompt: `你是"建筑师"，一个住在草地游戏里的顽皮精灵。
+玩家在 40x23 的网格上走动（坐标从 1 开始：x=1..40 从左到右，y=1..23 从上到下）。
+你通过工具实时改造世界：plant_tree、place_rock、spawn_creature、
+scatter_flowers、clear_area、set_time、set_weather、teleport_player、survey_world。
+规则：
+- 需要了解世界状态时先调用 survey_world。
+- 玩家位置在勘察报告里；把东西种在玩家**附近**，不要种在玩家身上。
+- 回复简短、有灵气。你在打理一座花园，不是在操作终端。`,
+  })));
+
+  const tool = (name, desc, props, required, fn) =>
+    a.registerTool(name, desc, JSON.stringify(
+      { type: "object", properties: props, required }), fn);
+
+  const int = (v) => Math.trunc(Number(v));
+  const toolMsg = (m) => { logLine("tool", "· " + m); return JSON.stringify({ text: m }); };
+
+  tool("plant_tree", "Plant a tree at a tile.",
+    { x: { type: "integer" }, y: { type: "integer" } }, ["x", "y"],
+    (args) => { const { x, y } = JSON.parse(args);
+      addEntity("tree", int(x), int(y)); return toolMsg(`种下了一棵树 (${int(x)},${int(y)})`); });
+
+  tool("place_rock", "Place a rock at a tile.",
+    { x: { type: "integer" }, y: { type: "integer" } }, ["x", "y"],
+    (args) => { const { x, y } = JSON.parse(args);
+      addEntity("rock", int(x), int(y)); return toolMsg(`放了一块石头 (${int(x)},${int(y)})`); });
+
+  tool("spawn_creature", "Spawn a wandering creature.",
+    { kind: { type: "string", enum: ["rabbit", "bird", "deer"] },
+      x: { type: "integer" }, y: { type: "integer" } }, ["kind", "x", "y"],
+    (args) => { const { kind, x, y } = JSON.parse(args);
+      addEntity("creature", int(x), int(y), kind);
+      return toolMsg(`生成了一只${KIND_CN[kind] ?? kind}`); });
+
+  tool("scatter_flowers", "Scatter n decorative flowers randomly (1-50).",
+    { n: { type: "integer" } }, ["n"],
+    (args) => { let n = Math.min(Math.max(int(JSON.parse(args).n), 1), 50);
+      for (let i = 0; i < n; i++)
+        addEntity("flower", 1 + Math.floor(Math.random() * COLS),
+                           1 + Math.floor(Math.random() * ROWS));
+      return toolMsg(`撒了 ${n} 朵花`); });
+
+  tool("clear_area", "Remove all entities within Chebyshev radius of a tile.",
+    { x: { type: "integer" }, y: { type: "integer" }, radius: { type: "integer" } },
+    ["x", "y", "radius"],
+    (args) => { const { x, y, radius } = JSON.parse(args);
+      const removed = removeInRadius(int(x), int(y), int(radius));
+      return toolMsg(`清除了 ${removed} 个实体`); });
+
+  tool("set_time", "Set the in-game time of day (0-24 hours).",
+    { hour: { type: "number" } }, ["hour"],
+    (args) => { let hour = Number(JSON.parse(args).hour) % 24;
+      if (hour < 0) hour += 24; world.time = hour;
+      return toolMsg(`时间设为 ${hour.toFixed(1)} 点`); });
+
+  tool("set_weather", "Set the weather.",
+    { weather: { type: "string", enum: ["clear", "rain"] } }, ["weather"],
+    (args) => { const w = JSON.parse(args).weather;
+      if (w !== "clear" && w !== "rain") throw new Error("weather must be clear|rain");
+      world.weather = w;
+      return toolMsg(`天气设为 ${w === "rain" ? "雨" : "晴"}`); });
+
+  tool("teleport_player", "Teleport the player to a tile.",
+    { x: { type: "integer" }, y: { type: "integer" } }, ["x", "y"],
+    (args) => { const { x, y } = JSON.parse(args);
+      player.x = Math.min(Math.max(Number(x), 1), COLS);
+      player.y = Math.min(Math.max(Number(y), 1), ROWS);
+      return toolMsg(`玩家传送到 (${int(x)},${int(y)})`); });
+
+  tool("survey_world", "Read-only world report: entity counts, time, weather, player position. Call this first to plan before acting.",
+    {}, [],
+    () => toolMsg("勘察：" + survey()));
+
+  return a;
+}
+
+function handleEvent(ev) {
+  switch (ev.type) {
+    case "agent_start":
+      agentActive = true; $("busy").classList.add("on"); break;
+    case "message_start":
+      builderLine = logLine("builder", "");
+      { const c = document.createElement("span"); c.className = "caret";
+        builderLine.appendChild(c); }
+      break;
+    case "text_delta":
+      if (builderLine) {
+        builderLine.querySelector(".caret")?.remove();
+        builderLine.append(ev.text);
+        $("log").scrollTop = $("log").scrollHeight;
+        const c = document.createElement("span"); c.className = "caret";
+        builderLine.appendChild(c);
+      }
+      break;
+    case "message_end":
+      if (builderLine) { builderLine.querySelector(".caret")?.remove(); builderLine = null; }
+      break;
+    case "agent_end":
+      agentActive = false; $("busy").classList.remove("on"); break;
+    case "error":
+      logLine("err", `${ev.error_type ?? "error"}: ${ev.message}`);
+      break;
+  }
+}
+
+async function pump() {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 40));
+    const lines = agent.poll();
+    for (const line of lines) handleEvent(JSON.parse(line));
+    if (!lines.length && !agentActive) break;
+  }
+}
+
+$("inputrow").onsubmit = (e) => {
+  e.preventDefault();
+  const text = $("chat").value.trim();
+  if (!text || agentActive) return;
+  try {
+    if (!agent) agent = makeAgent();
+  } catch (err) { logLine("err", String(err.message ?? err)); return; }
+  $("chat").value = "";
+  logLine("you", text);
+  agent.prompt(text);
+  pump();
+};
+$("send").onclick = () => $("inputrow").requestSubmit();
+$("chat").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault(); $("inputrow").requestSubmit();
+  }
+  if (e.key === "Escape") { toggleConsole(false); }
+});
+
+// settings drawer —— 配置一次全 demo 共享（localStorage）
+$("gear").onclick = () => $("settings").classList.toggle("open");
+bindSettings({ preset: "preset", baseurl: "baseurl", apikey: "apikey", model: "model" },
+  () => { agent = null; });
+
+// 开局欢迎
+logLine("builder", "你来到一片草地。⚙ 配置一次 API（全 demo 共用），Enter 和我说话。");
+toggleConsole(false);
+</script>
+</body>
+</html>
