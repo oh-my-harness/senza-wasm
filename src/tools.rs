@@ -10,7 +10,9 @@
 use futures::StreamExt;
 use llm_harness_types::{DataBlock, Tool, ToolContext, ToolFailure, ToolFuture, ToolResult};
 use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
 
 /// A tool backed by a JS async callback:
@@ -20,6 +22,7 @@ pub struct JsTool {
     name: String,
     description: String,
     schema: serde_json::Value,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // executed on wasm only
     callback: js_sys::Function,
 }
 
@@ -52,6 +55,7 @@ impl Tool for JsTool {
         &self.schema
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn execute<'a>(&'a self, args: serde_json::Value, _ctx: &'a ToolContext) -> ToolFuture<'a> {
         let callback = self.callback.clone();
         Box::pin(async move {
@@ -88,6 +92,15 @@ impl Tool for JsTool {
                 terminate,
             ))
         })
+    }
+
+    /// JS callbacks only exist inside a JS runtime; the native `Tool`
+    /// signature requires `Send`, which `JsValue` can never be. Compiling
+    /// the facade for a native target is meaningless anyway — fail loudly
+    /// instead of pretending.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn execute<'a>(&'a self, _args: serde_json::Value, _ctx: &'a ToolContext) -> ToolFuture<'a> {
+        unreachable!("JsTool requires a JS runtime — build for wasm32")
     }
 }
 
@@ -188,6 +201,75 @@ fn parse_pump_result(call_id: &str, result_json: &str) -> Result<ToolResult, Too
     ))
 }
 
+/// Host approval gate (M3 spec §3.3): wraps a tool in `HookedTool` with a
+/// before-hook that parks a one-shot channel under the LLM-assigned
+/// `tool_use_id` until the host calls `approveToolCall(id, allow)`.
+/// allow → `Allow` (inner tool runs); deny → `Deny(denied_by_host)`,
+/// which the kernel turns into a `ToolFailure` visible to the LLM.
+pub struct ApprovalGate {
+    /// `tool_use_id` → sender for the pending approval decision.
+    pending: parking_lot::Mutex<
+        std::collections::HashMap<String, futures::channel::oneshot::Sender<bool>>,
+    >,
+}
+
+impl ApprovalGate {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            pending: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        })
+    }
+
+    /// Fire the host's decision for `tool_use_id`. Errors if the id is
+    /// unknown (no parked call) or already answered.
+    pub fn approve(&self, tool_use_id: &str, allow: bool) -> Result<(), String> {
+        match self.pending.lock().remove(tool_use_id) {
+            Some(tx) => tx
+                .send(allow)
+                .map_err(|_| format!("approval receiver dropped for '{tool_use_id}'")),
+            None => Err(format!(
+                "unknown or already-approved tool_use_id '{tool_use_id}'"
+            )),
+        }
+    }
+}
+
+impl llm_harness_types::BeforeToolCallHook for ApprovalGate {
+    fn on_call<'a>(
+        &'a self,
+        ctx: llm_harness_types::BeforeToolCallCtx<'a>,
+    ) -> futures::future::BoxFuture<'a, llm_harness_types::BeforeToolCallDecision> {
+        let (tx, rx) = futures::channel::oneshot::channel::<bool>();
+        self.pending.lock().insert(ctx.tool_use_id.to_string(), tx);
+        Box::pin(async move {
+            match rx.await {
+                Ok(true) => llm_harness_types::BeforeToolCallDecision::Allow,
+                Ok(false) => llm_harness_types::BeforeToolCallDecision::Deny(ToolFailure::new(
+                    "denied_by_host",
+                    "The host denied this tool call.",
+                )),
+                // Receiver dropped without a decision (agent dropped):
+                // deny rather than hang.
+                Err(_) => llm_harness_types::BeforeToolCallDecision::Deny(ToolFailure::new(
+                    "denied_by_host",
+                    "Approval gate dropped before a decision arrived.",
+                )),
+            }
+        })
+    }
+}
+
+/// Wrap `inner` with the host approval gate (M3). The returned tool keeps
+/// the inner tool's identity (name/description/schema) — `HookedTool`
+/// delegates the `Tool` surface and only intercepts execution.
+pub fn with_approval(inner: Arc<dyn Tool>, gate: Arc<ApprovalGate>) -> Arc<dyn Tool> {
+    Arc::new(llm_harness_loop::HookedTool {
+        inner,
+        before: Some(gate),
+        after: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +325,57 @@ mod tests {
     fn pending_tool_resolve_unknown_id_errors() {
         let tool = PendingTool::new("echo".into(), "pump echo".into(), serde_json::json!({}));
         assert!(tool.resolve("nope", "{}".into()).is_err());
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn approval_gate_allow_and_deny() {
+        use futures::future::BoxFuture;
+        use llm_harness_types::{
+            BeforeToolCallCtx, BeforeToolCallDecision, BeforeToolCallHook, RunContext, RunRequest,
+        };
+
+        let ctx = make_ctx();
+        let run = Arc::new(RunContext::new(RunRequest::default()));
+        let before_ctx = BeforeToolCallCtx {
+            run: &run,
+            assistant_message: &ctx.assistant_message,
+            tool_use_id: "c1",
+            tool_name: "danger",
+            args: &serde_json::json!({}),
+            turn_index: 0,
+        };
+
+        // allow path
+        let gate = ApprovalGate::new();
+        let fut: BoxFuture<'_, BeforeToolCallDecision> =
+            BeforeToolCallHook::on_call(&*gate, before_ctx);
+        gate.approve("c1", true).unwrap();
+        assert!(matches!(
+            futures::executor::block_on(fut),
+            BeforeToolCallDecision::Allow
+        ));
+
+        // deny path (fresh ctx — on_call takes it by value)
+        let gate = ApprovalGate::new();
+        let before_ctx = BeforeToolCallCtx {
+            run: &run,
+            assistant_message: &ctx.assistant_message,
+            tool_use_id: "c1",
+            tool_name: "danger",
+            args: &serde_json::json!({}),
+            turn_index: 0,
+        };
+        let fut: BoxFuture<'_, BeforeToolCallDecision> =
+            BeforeToolCallHook::on_call(&*gate, before_ctx);
+        gate.approve("c1", false).unwrap();
+        match futures::executor::block_on(fut) {
+            BeforeToolCallDecision::Deny(f) => {
+                assert_eq!(f.code, "denied_by_host");
+            }
+            _ => panic!("expected Deny"),
+        }
+
+        // unknown id
+        assert!(gate.approve("nope", true).is_err());
     }
 }

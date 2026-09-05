@@ -42,6 +42,10 @@ pub(crate) struct AgentState {
     /// Lifetime token totals (M2 spec §3.2). Not reset by clear/import —
     /// cost is process-lifetime diagnostics, conversation state is not.
     pub cost: CostState,
+    /// Approval gates by tool name (M3 spec §3.3); `approve_tool_call`
+    /// routes by tool_use_id through each gate (same pattern as
+    /// `pump_by_name` + `resolve_tool`).
+    pub gates_by_name: std::collections::HashMap<String, Arc<crate::tools::ApprovalGate>>,
     /// message_ids already counted into `cost` (dedup across
     /// MessageEnd/TurnEnd projections of the same assistant message).
     pub cost_seen: std::collections::HashSet<String>,
@@ -72,6 +76,7 @@ impl AgentState {
             pump_by_name: std::collections::HashMap::new(),
             cost: CostState::default(),
             cost_seen: std::collections::HashSet::new(),
+            gates_by_name: std::collections::HashMap::new(),
         }
     }
 }
@@ -324,6 +329,21 @@ impl EmbeddedAgent {
     }
 }
 
+/// `registerToolWithOptions` payload (M3 spec §3.3).
+#[derive(serde::Deserialize, Default, Debug)]
+struct ToolOptions {
+    #[serde(default)]
+    approval: ToolApproval,
+}
+
+#[derive(serde::Deserialize, Default, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum ToolApproval {
+    #[default]
+    Auto,
+    Manual,
+}
+
 /// Parse the constructor options JSON (single parse point; tests and
 /// later tasks reuse it with an injected client).
 fn parse_opts(opts_json: String) -> Result<AgentOpts, JsValue> {
@@ -397,26 +417,86 @@ impl EmbeddedAgent {
         schema_json: String,
         callback: Option<js_sys::Function>,
     ) -> Result<(), JsValue> {
+        self.register_tool_inner(
+            name,
+            description,
+            schema_json,
+            callback,
+            ToolOptions::default(),
+        )
+    }
+
+    /// `registerTool` with options (M3 spec §3.3):
+    /// `options_json = {"approval":"auto"|"manual"}` (default auto).
+    /// With manual, execution pauses at the approval gate until the host
+    /// calls `approveToolCall(toolUseId, allow)`.
+    #[wasm_bindgen(js_name = registerToolWithOptions)]
+    pub fn register_tool_with_options(
+        &self,
+        name: String,
+        description: String,
+        schema_json: String,
+        callback: Option<js_sys::Function>,
+        options_json: String,
+    ) -> Result<(), JsValue> {
+        let opts: ToolOptions = serde_json::from_str(&options_json)
+            .map_err(|e| JsValue::from_str(&format!("invalid tool options: {e}")))?;
+        self.register_tool_inner(name, description, schema_json, callback, opts)
+    }
+
+    /// Answer a pending approval (M3): `allow=false` denies the call with
+    /// a `denied_by_host` ToolFailure the LLM can see and react to.
+    #[wasm_bindgen(js_name = approveToolCall)]
+    pub fn approve_tool_call(&self, tool_use_id: String, allow: bool) -> Result<(), JsValue> {
+        let state = self.state.lock();
+        // A pending id lives in exactly one gate; try each.
+        for gate in state.gates_by_name.values() {
+            if gate.approve(&tool_use_id, allow).is_ok() {
+                return Ok(());
+            }
+        }
+        Err(JsValue::from_str(&format!(
+            "approveToolCall: unknown or already-approved tool_use_id '{tool_use_id}'"
+        )))
+    }
+
+    fn register_tool_inner(
+        &self,
+        name: String,
+        description: String,
+        schema_json: String,
+        callback: Option<js_sys::Function>,
+        opts: ToolOptions,
+    ) -> Result<(), JsValue> {
         let schema: serde_json::Value = serde_json::from_str(&schema_json)
             .map_err(|e| JsValue::from_str(&format!("invalid tool schema: {e}")))?;
-        let mut state = self.state.lock();
-        match callback {
-            Some(cb) => {
-                state
-                    .tools
-                    .push(Arc::new(JsTool::new(name, description, schema, cb)));
-            }
+        // Build the base tool, then wrap with the approval gate if manual.
+        let base: Arc<dyn Tool> = match callback {
+            Some(cb) => Arc::new(JsTool::new(name, description, schema, cb)),
             None => {
                 // Pump placeholder. resolve_tool addresses calls by the
                 // LLM-assigned tool_use_id (surfaced on the
                 // tool_execution_start event); PendingTool::execute parks
                 // a one-shot channel under that id when the loop calls it.
                 let tool = crate::tools::PendingTool::new(name, description, schema);
-                state
+                let tool_name = tool.name().to_string();
+                self.state
+                    .lock()
                     .pump_by_name
-                    .insert(tool.name().to_string(), tool.clone());
-                state.tools.push(tool);
+                    .insert(tool_name, tool.clone());
+                tool
             }
+        };
+        if opts.approval == ToolApproval::Manual {
+            let gate = crate::tools::ApprovalGate::new();
+            self.state
+                .lock()
+                .gates_by_name
+                .insert(base.name().to_string(), gate.clone());
+            let wrapped = crate::tools::with_approval(base, gate);
+            self.state.lock().tools.push(wrapped);
+        } else {
+            self.state.lock().tools.push(base);
         }
         Ok(())
     }

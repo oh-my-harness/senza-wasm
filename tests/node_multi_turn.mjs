@@ -191,6 +191,87 @@ async function main() {
   assert(cost.totalInputTokens === 17 && cost.totalOutputTokens === 8 && cost.providerCalls === 2,
     "costSnapshot totals: " + JSON.stringify(cost));
   console.log("COST SNAPSHOT PASS");
+
+  // --- M3: approval gate — approve path ---
+  {
+    const agent = new EmbeddedAgent(JSON.stringify({
+      provider: "mock",
+      model: "mock-model",
+      mockScript: [
+        { kind: "tool_use", toolUseId: "a1", name: "danger", args: "{}" },
+        { kind: "text", text: "approved and done" },
+      ],
+    }));
+    agent.registerToolWithOptions("danger", "needs approval",
+      JSON.stringify({ type: "object" }),
+      async () => JSON.stringify({ text: "ran" }),
+      JSON.stringify({ approval: "manual" }));
+    agent.prompt("go");
+    let evs = [];
+    for (let i = 0; i < 400 && !evs.some((e) => e.type === "agent_end"); i++) {
+      await new Promise((r) => setTimeout(r, 25));
+      for (const l of agent.poll()) {
+        const e = JSON.parse(l);
+        evs.push(e);
+        if (e.type === "tool_execution_start") {
+          // approve only after seeing the start event (gate is parked)
+          agent.approveToolCall(e.tool_use_id, true);
+        }
+      }
+    }
+    const ok = evs.some((e) => e.type === "tool_execution_start")
+      && evs.some((e) => e.type === "tool_execution_end")
+      && evs.some((e) => e.type === "agent_end");
+    assert(ok, "approve path: " + evs.map((e) => e.type).join(" -> "));
+    console.log("APPROVAL (approve) PASS");
+  }
+
+  // --- M3: approval gate — deny path: failure visible to the LLM ---
+  {
+    const agent = new EmbeddedAgent(JSON.stringify({
+      provider: "mock",
+      model: "mock-model",
+      mockScript: [
+        { kind: "tool_use", toolUseId: "a1", name: "danger", args: "{}" },
+        { kind: "text", text: "denied, moving on" },
+      ],
+    }));
+    agent.registerToolWithOptions("danger", "needs approval",
+      JSON.stringify({ type: "object" }),
+      async () => JSON.stringify({ text: "should never run" }),
+      JSON.stringify({ approval: "manual" }));
+    agent.prompt("go");
+    let evs = [];
+    let denyEnd = null;
+    for (let i = 0; i < 400 && !evs.some((e) => e.type === "agent_end"); i++) {
+      await new Promise((r) => setTimeout(r, 25));
+      for (const l of agent.poll()) {
+        const e = JSON.parse(l);
+        evs.push(e);
+        if (e.type === "tool_execution_start") {
+          agent.approveToolCall(e.tool_use_id, false);
+        }
+        if (e.type === "tool_execution_end") denyEnd = e;
+      }
+    }
+    const endJson = JSON.stringify(denyEnd ?? {});
+    assert(denyEnd && /denied_by_host|error/i.test(endJson),
+      "deny path must surface failure: " + endJson);
+    assert(evs.some((e) => e.type === "agent_end"), "deny path completes");
+    console.log("APPROVAL (deny) PASS");
+  }
+
+  // --- M3: approveToolCall with unknown id → error ---
+  {
+    const agent = new EmbeddedAgent(JSON.stringify({
+      provider: "mock", model: "mock-model",
+    }));
+    agent.registerToolWithOptions("danger", "d", "{}",
+      async () => "{}", JSON.stringify({ approval: "manual" }));
+    assert.throws(() => agent.approveToolCall("nonexistent", true),
+      /unknown or already-approved tool_use_id/);
+    console.log("APPROVAL (unknown id) PASS");
+  }
  }
 
 await main();
