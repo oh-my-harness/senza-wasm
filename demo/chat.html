@@ -235,26 +235,41 @@ function inlineMd(s) {
   }
   return out;
 }
-// 行内数学：$..$ 与 \(..\)（KaTeX 不在或渲染失败 → 原样返回）
+// 行内数学：$..$ 与 \(..\)。display 数学（$$..$$ / \[..\]，可跨行）在
+// mdToHtml 的 flushP 里对整段跑 —— 单行处理永远见不到闭合定界符。
 function renderInlineMath(html) {
   if (typeof katex === "undefined") return html;  // KaTeX 未就绪：留原文，定稿时重渲染
   return html.replace(
-    /(\$\$[\s\S]+?\$\$)|(\$[^\s$][^\n$]*?\$)|(\\\(([\s\S]+?)\\\))|(\\\[([\s\S]+?)\\\])/g,
-    (m, dd, d, pl, plainP, br, plainB) => {
-      let tex, display;
-      if (dd) { tex = dd.slice(2, -2); display = true; }
-      else if (d) {
+    /(\$[^\s$][^\n$]*?\$)|(\\\(([\s\S]+?)\\\))/g,
+    (m, d, pl, plainP) => {
+      let tex;
+      if (d) {
         // 货币误判防护：$5$ 这种两侧紧贴数字的当钱处理；首尾去空白
-        tex = d.slice(1, -1); display = false;
+        tex = d.slice(1, -1);
         if (/^\d[\d.,\s]*\d$|^\d$/.test(tex.trim())) return m;
-      }
-      else if (plainP != null) { tex = plainP; display = false; }
-      else { tex = plainB; display = true; }
+      } else tex = plainP;
       if (!tex.trim()) return m;
       try {
-        return katex.renderToString(unescapeMd(tex), { displayMode: display, throwOnError: false });
+        return katex.renderToString(unescapeMd(tex), { throwOnError: false });
       } catch { return m; }
     });
+}
+// display 数学：$$..$$ 与 \[..\]，可跨行。inlineMd 已逐行处理过行内标记，
+// 这里对拼接后的整段跑（<br> 由换行而来，出现在定界符间不影响 TeX 源）；
+// <code> 段已由 inlineMd 定型，跳过以免 code 内的 $ 被误吃。
+function renderDisplayMath(html) {
+  if (typeof katex === "undefined") return html;
+  const render = (s) => s.replace(
+    /(\$\$([\s\S]+?)\$\$)|(\\\[([\s\S]+?)\\\])/g,
+    (m, dd, plainD, br, plainB) => {
+      const tex = (plainD != null ? plainD : plainB).replace(/<br\s*\/?>/g, "\n");
+      if (!tex.trim()) return m;
+      try {
+        return katex.renderToString(unescapeMd(tex), { displayMode: true, throwOnError: false });
+      } catch { return m; }
+    });
+  return html.split(/(<code>[\s\S]*?<\/code>)/g).map(
+    (p) => p.startsWith("<code>") ? p : render(p)).join("");
 }
 // esc() 转义过的实体还原回 TeX 源码
 function unescapeMd(s) {
@@ -264,7 +279,11 @@ function unescapeMd(s) {
 function mdToHtml(src) {
   const lines = src.replace(/\r\n?/g, "\n").split("\n");
   let html = "", i = 0;
-  const flushP = (buf) => { if (buf.length) html += "<p>" + buf.map(inlineMd).join("<br>") + "</p>"; };
+  // 段落先整体跑 display 数学（$$..$$ / \[..\] 可跨行），再逐行过行内规则
+  const flushP = (buf) => {
+    if (!buf.length) return;
+    html += "<p>" + renderDisplayMath(buf.map(inlineMd).join("<br>")) + "</p>";
+  };
   let para = [];
   while (i < lines.length) {
     const L = lines[i];
