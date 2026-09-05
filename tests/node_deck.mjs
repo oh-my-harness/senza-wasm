@@ -67,7 +67,7 @@ console.log("DECK MODEL & TOOLS PASS");
   assert(doc.includes("Hi"), "嵌入第 1 页内容");
   assert(doc.includes("bye"), "嵌入第 3 页内容");
   assert(doc.includes('class="page skeleton"'), "第 2 页缺页渲染骨架");
-  assert(/let cur = 3/.test(doc) || /var cur = 3/.test(doc), "初始页码嵌入");
+  assert(/Math\.min\(3, pages\.length\)/.test(doc), "初始页码嵌入");
   assert(doc.includes("deckGo"), "postMessage 翻页通道");
   assert(doc.includes("ArrowRight"), "方向键翻页");
   assert(doc.includes("<title>封面</title>"), "文档 title 取第 1 页标题");
