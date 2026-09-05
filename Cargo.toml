@@ -9,8 +9,8 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-llm-harness-loop = { git = "file:///Users/hhl/Documents/projs/oh-my-harness/llm-harness-runtime", rev = "1aa9237", features = ["test-utils"] }
-llm-harness-types = { git = "file:///Users/hhl/Documents/projs/oh-my-harness/llm-harness-runtime", rev = "1aa9237" }
+llm-harness-loop = { git = "https://github.com/oh-my-harness/llm-harness-runtime", rev = "1aa9237", features = ["test-utils"] }
+llm-harness-types = { git = "https://github.com/oh-my-harness/llm-harness-runtime", rev = "1aa9237" }
 llm_adapter = { git = "https://github.com/oh-my-harness/llm-api-adapter", rev = "33d34033cbc999667309f533bec198ce411efdc7" }
 parking_lot = "0.12"
 tokio = { version = "1", default-features = false, features = ["sync"] }
