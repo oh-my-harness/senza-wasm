@@ -15,7 +15,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <link rel="icon" href="data:," />
 <title>谁是卧底 · agent 圆桌</title>
 <style>
@@ -125,6 +125,40 @@
     background: rgba(13,17,26,0.72); backdrop-filter: blur(14px);
     color: #b8c0cc; text-decoration: none; font-size: 15px; line-height: 36px;
     text-align: center; }
+  /* ---- 移动端：对齐 chat/deck 的 720px 断点 ---- */
+  @media (max-width: 720px) {
+    /* 圆桌：锚在底部两栏上方，按高度收缩，避开顶部日志 */
+    #table { align-items: flex-end; padding-bottom: 130px; }
+    #ring { width: min(90vw, calc(100vh - 380px)); height: min(90vw, calc(100vh - 380px)); }
+    .seat { width: 84px; margin: -56px 0 0 -42px; }
+    .seat .avatar { width: 52px; height: 52px; font-size: 24px; line-height: 48px; }
+    .seat .name { font-size: 12px; }
+    .seat .bub { font-size: 11px; min-height: 24px; }
+    #center { width: 52%; }
+    #center .yourword b { font-size: 20px; }
+
+    /* 顶栏：避开右上角的返回/设置按钮，允许收窄换行 */
+    #hud { left: 12px; right: 96px; transform: none; flex-wrap: wrap;
+      gap: 6px 14px; padding: 7px 12px; font-size: 12px; border-radius: 14px; }
+    #start { padding: 4px 12px; }
+
+    /* 日志：放在顶栏与圆桌之间的空档，不遮座位 */
+    #log { left: 10px; right: 10px; width: auto; top: 92px; max-height: 150px;
+      font-size: 11px; }
+
+    /* 投票按钮可换行 */
+    #votebar { width: calc(100vw - 24px); flex-wrap: wrap; justify-content: center;
+      bottom: 84px; }
+    #votebar button { padding: 8px 12px; font-size: 13px; }
+
+    /* 发言输入：16px 防 iOS 聚焦放大 */
+    #speakbar { bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
+    #speakbar input { font-size: 16px; }
+
+    #settings { width: calc(100vw - 24px); }
+    #gear { top: 12px; right: 12px; }
+    a.back { top: 12px; right: 58px; }
+  }
 </style>
 </head>
 <body>
