@@ -20,7 +20,7 @@ export function providerOpts(extra = {}) {
     provider: "openai",
     apiKey: cfg.apiKey || "",
     baseUrl: cfg.baseUrl || undefined,
-    model: cfg.model || "gpt-4o-mini",
+    model: cfg.model || "deepseek-chat",
     ...extra,
   };
 }
@@ -32,7 +32,7 @@ export function bindSettings(fieldIds, onChange) {
   const el = (k) => document.getElementById(fieldIds[k]);
   el("baseurl").value = cfg.baseUrl || "";
   el("apikey").value = cfg.apiKey || "";
-  el("model").value = cfg.model || "gpt-4o-mini";
+  el("model").value = cfg.model || "deepseek-chat";
   el("preset").onchange = () => {
     const u = el("preset").value;
     if (u) el("baseurl").value = u;
@@ -43,7 +43,7 @@ export function bindSettings(fieldIds, onChange) {
       saveCfg({
         baseUrl: el("baseurl").value.trim(),
         apiKey: el("apikey").value.trim(),
-        model: el("model").value.trim() || "gpt-4o-mini",
+        model: el("model").value.trim() || "deepseek-chat",
       });
       onChange?.();
     });

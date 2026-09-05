@@ -131,8 +131,8 @@
 <div id="settings">
   <label>预设（OpenAI 兼容端点）</label>
   <select id="preset">
-    <option value="https://api.openai.com/v1" selected>OpenAI 官方</option>
-    <option value="https://api.deepseek.com/v1">DeepSeek</option>
+    <option value="https://api.deepseek.com/v1" selected>DeepSeek（默认，便宜好用）</option>
+    <option value="https://api.openai.com/v1">OpenAI 官方</option>
     <option value="https://api.moonshot.cn/v1">Moonshot (Kimi)</option>
     <option value="https://ark.cn-beijing.volces.com/api/v3">火山方舟</option>
     <option value="https://open.bigmodel.cn/api/paas/v4">智谱 GLM</option>
@@ -140,11 +140,13 @@
     <option value="">自定义…</option>
   </select>
   <label>API base URL</label>
-  <input id="baseurl" placeholder="https://api.openai.com/v1" />
-  <label>API key（仅存于页面内存）</label>
+  <input id="baseurl" placeholder="https://api.deepseek.com/v1" />
+  <label>API key（存你的浏览器 localStorage，不经任何服务器）</label>
   <input id="apikey" type="password" placeholder="sk-…" />
+  <p class="note">还没有 key？<a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener"
+    style="color:#6ea8ff">去 DeepSeek 开放平台创建 →</a>（几块钱够玩很久）</p>
   <label>model</label>
-  <input id="model" value="gpt-4o-mini" />
+  <input id="model" value="deepseek-chat" />
   <p class="note">key 存你浏览器的 localStorage，全 demo 共用；不经任何服务器。
   浏览器直连需端点允许 CORS（官方 API 均可）。</p>
 </div>

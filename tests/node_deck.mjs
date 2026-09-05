@@ -54,3 +54,27 @@ import { Deck, makeDeckTools } from "../demo/deck.js";
 }
 
 console.log("DECK MODEL & TOOLS PASS");
+
+// —— 3. 组装器：缺页骨架、初始页、翻页通道、标题 ——
+{
+  const { buildDeckDocument } = await import("../demo/deck.js");
+  const d = new Deck();
+  d.write(1, "封面", '<section><h1 style="font-size:7vmin">Hi</h1></section>');
+  d.write(3, "结尾", "<section>bye</section>");
+  const doc = buildDeckDocument(d, 3);
+
+  assert(doc.startsWith("<!doctype html>"), "完整文档");
+  assert(doc.includes("Hi"), "嵌入第 1 页内容");
+  assert(doc.includes("bye"), "嵌入第 3 页内容");
+  assert(doc.includes('class="page skeleton"'), "第 2 页缺页渲染骨架");
+  assert(/let cur = 3/.test(doc) || /var cur = 3/.test(doc), "初始页码嵌入");
+  assert(doc.includes("deckGo"), "postMessage 翻页通道");
+  assert(doc.includes("ArrowRight"), "方向键翻页");
+  assert(doc.includes("<title>封面</title>"), "文档 title 取第 1 页标题");
+  assert(doc.includes('id="pg"'), "页码指示元素存在");
+
+  const empty = buildDeckDocument(new Deck(), 1);
+  assert(empty.includes("暂无页面"), "空 deck 的空态文案");
+}
+
+console.log("DECK DOC PASS");

@@ -60,7 +60,7 @@ import { loadCfg } from "./common.js";
 const cfg = loadCfg();
 const el = document.getElementById("cfgstate");
 if (cfg.apiKey || (cfg.baseUrl || "").includes("localhost"))
-  el.innerHTML = `API 已配置（<b>${cfg.model || "gpt-4o-mini"}</b> @ ${cfg.baseUrl || "官方端点"}）—— 直接开玩；换配置进任一 demo 的 ⚙ 设置`;
+  el.innerHTML = `API 已配置（<b>${cfg.model || "deepseek-chat"}</b> @ ${cfg.baseUrl || "DeepSeek 官方端点"}）—— 直接开玩；换配置进任一 demo 的 ⚙ 设置`;
 else
   el.textContent = "还没配置 API：进入任一 demo 点右上角 ⚙ 填一次（key 只存你浏览器 localStorage）";
 </script>
