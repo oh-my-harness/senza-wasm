@@ -4,15 +4,16 @@ senza-wasm：把 llm-harness 内核（loop / 流式 / 工具 / 断路器）以 W
 交付给 TypeScript 生态。设计 spec 与实施计划在 Senza 仓库
 （`docs/superpowers/specs/2026-09-03-senza-wasm-design.md`、
 `docs/superpowers/plans/2026-09-04-senza-wasm-implementation.md`），
-本文件只追踪这个仓库自己的进度与下一步。
+本仓库自有 spec 在 `docs/superpowers/specs/`（M1：
+`2026-09-05-senza-wasm-session-core-design.md`）。
 
-当前状态标注（2026-09-04）：
+当前状态标注（2026-09-05）：
 
 - ✅ 已完成并实测验证
 - 🚧 进行中
 - ⬜ 未开始
 
-## v0.1 — 内核通行证 + 门面（当前）
+## v0.1 — 内核通行证 + 门面（已完成，遗留 2 项归入 M1/M2）
 
 | 项 | 状态 | 说明 |
 |---|---|---|
@@ -26,42 +27,74 @@ senza-wasm：把 llm-harness 内核（loop / 流式 / 工具 / 断路器）以 W
 | wasm32 测试（events 序列化 + 工具桥） | ✅ | wasm-bindgen-test-runner 真机 7/7 |
 | Node 冒烟（完整 mock turn + 事件序列断言） | ✅ | `tests/node_smoke.mjs`，release 构建验证 |
 | clippy `-D warnings`（wasm32） | ✅ | CI 配置就位（`.github/workflows/ci.yml`） |
-| **GitHub 远端仓库 + CI 跑起来** | ⬜ | 本地提交 `2d5e20b` 待推送 |
-| **`stream_timeout_ms`（连接/stream 超时）真 key 路径实测** | ⬜ | mock 路径已覆盖 watchdog；真 reqwest-wasm fetch 路径未测 |
 
-## v0.2 — 可发布（npm 包）
+**v0.1 实测后追加（2026-09-05 内核实证，详见 M1 spec §1）**：
 
-| 项 | 状态 | 说明 |
-|---|---|---|
-| `npm/` 包裹层：判别联合类型 + `AgentEvent` TS 类型 | ⬜ | spec §4.2：`.wasm` 导出面保持原始 JSON 行，类型在包裹层 |
-| `.d.ts` 完整 + `tsc --strict` 通过 | ⬜ | spec §4.4 验收之一 |
-| wasm-pack 双产物 CI（bundler + nodejs） | ⬜ | spec §4.3；当前 ci.yml 只构建 nodejs |
-| npm 发布流水线（包名 `senza-wasm`，scope 待定 — spec 未定项 1） | ⬜ | 版本跟随内核 rev，`0.x` 起步 |
-| 浏览器 demo（README 级：单页 chat + 一个工具） | ⬜ | spec §4.4；key 暴露约束见 §5 风险表 |
-| 多轮工具对话冒烟（tool_call → resolveTool → 下一轮） | ⬜ | spec §4.4 事件序列断言的完整版 |
+- **门面 prompt 文本从未进入对话**（`agent_loop` 不读
+  `config.run.initial_messages`，门面传 `messages: vec![]`）——
+  mock 冒烟因 MockLlmClient 不查请求内容而假绿。M1 修复。
+- **真 key 路径必坏**（同上）——`stream_timeout_ms` 真 key 实测
+  顺延到 M2，M1 落地后真 key 才有测试意义。
 
-## v0.3 — 内核子集扩展
+## M1 — 会话核心 + 测试基建（当前，spec 已批准）
+
+spec：`docs/superpowers/specs/2026-09-05-senza-wasm-session-core-design.md`
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| `poll()` 返回 `string[]` vs `ArrayBuffer` 定夺 | ⬜ | spec 未定项 2，等实测事件吞吐 |
-| loop_safety 策略族进 wasm（不依赖 sandbox/文件系统的部分） | ⬜ | spec 未定项 3，倾向首版不进 |
-| `registerTool` pump 路径的 call_id 语义与 Python SDK 对齐复查 | ⬜ | 当前用 `tool_use_id`（LLM 分配 id）寻址 |
-| Anthropic provider 进门面 | ⬜ | spec §4.2 webidl 已列，门面当前只有 openai + mock |
+| mock script（text / tool_use / rate_limit_error 序列） | ⬜ | spec §3.3；复用内核 `MockResponse`，无上游改动 |
+| 对话连续性（history + [user_msg] 续接，增量合并，busy 守护） | ⬜ | spec §3.1；修复 prompt 文本注入 bug |
+| exportSession / importSession / clearSession + 代次计数 | ⬜ | spec §3.2；宿主持久化，门面自有 JSON 契约 |
+| Error→AgentEnd 事件循环修正 | ⬜ | spec §3.1；break 条件只认 AgentEnd |
+| call_id 语义与 Python SDK 复查 | ⬜ | spec §3.4；判定标准：事件字段名以 Python SDK 为准 |
+| 多轮工具冒烟（pump + JsTool 路径 + 反例） | ⬜ | spec §4；`tests/node_multi_turn.mjs` |
+| 浏览器真机冒烟（headless Chromium） | ⬜ | spec §4；手动门，不进 CI |
+| GitHub 远端仓库 + CI 首跑 | ⬜ | 前提项；本地提交待推送 |
+
+## M2 — config 透传 + 成本 + npm 包（M1 后）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| `responseFormat`（structured output）透传 | ⬜ | LoopConfig 已有字段，AgentOpts 加一行 |
+| `finalAnswerMode` 透传 | ⬜ | 同上 |
+| `costSnapshot()`（UsageLedger/CostAggregate） | ⬜ | 事件流已带 usage，只差累计快照 |
+| `stream_timeout_ms` 真 key 实测 | ⬜ | M1 落地后才有意义 |
+| `npm/` 包裹层：判别联合类型 + `AgentEvent` TS 类型 | ⬜ | 原 spec §4.2 |
+| `.d.ts` 完整 + `tsc --strict` | ⬜ | 原 spec §4.4 |
+| wasm-pack 双产物 CI（bundler + nodejs） | ⬜ | 当前 ci.yml 只构建 nodejs |
+| npm 发布流水线（包名/scope 待定） | ⬜ | 版本跟随内核 rev，`0.x` 起步 |
+| 浏览器 demo（单页 chat + 一个工具） | ⬜ | M1 冒烟 html 可作底子 |
+| `poll()` 返回 `string[]` vs `ArrayBuffer` 定夺 | ⬜ | 等 npm wrapper 类型层实测吞吐再议 |
+
+## M3 — 工具审批门（M2 后）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| `registerTool` 加 `approval: "auto" \| "manual"` | ⬜ | manual 时 tool_execution_start 暂停，`approveToolCall(id, allow)` 决定 |
+| 基于 HookedTool `BeforeToolCallHook`（Allow/Deny） | ⬜ | 内核已有，纯 Rust，无上游改动 |
+| 审批流冒烟（approve / deny / 超时） | ⬜ | 事件序列断言 |
+
+## M4 — loop_safety 策略族（节奏取决于上游）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 上游：loop_safety 从 strategy 拆为只依赖 types+loop 的 crate | ⬜ | strategy 依赖 llm-harness-agent（拖 sandbox/tempfile），需上游拆分；拆分方案届时与上游维护者讨论 |
+| 消费：repetition / failure-breaker / death-spiral / truncation 进 wasm | ⬜ | 上游拆分后直接消费，本仓库不重写安全语义 |
+| Anthropic provider 进门面 | ⬜ | 与 M4 无依赖，可提前 |
 
 ## v1.0 — 第二宿主
 
 | 项 | 状态 | 说明 |
 |---|---|---|
 | Unity / Puerts 插件（fetch shim、C# bridge） | ⬜ | 独立 spec，不在此仓库 |
-| wasm 二进制体积优化（gzip + 按需 feature 裁剪） | ⬜ | spec §5：首版接受 reqwest+rustls 全家桶 |
+| wasm 二进制体积优化（gzip + 按需 feature 裁剪） | ⬜ | 首版接受 reqwest+rustls 全家桶 |
 
 ## 约束（每个 milestone 都继承）
 
-- 内核 crates 零 wasm-bindgen 痕迹——绑定全部在本仓库（spec §2 决策 4）
+- 内核 crates 零 wasm-bindgen 痕迹——绑定全部在本仓库（原 spec §2 决策 4）
 - 内核以 git rev 锁定；**不得用 path 依赖开发**（path 依赖会把 runtime
   workspace 的 feature unification 拖进来，mio/rusqlite 等 native 依赖
   污染 wasm 编译——2026-09-04 实测）
 - 事件 `type` 字符串与 Senza Python SDK 一字不差；新增事件先改
   Python 侧映射，再同步这里
-- 浏览器仅开发/演示；生产 key 走代理网关（spec §5）
+- 浏览器仅开发/演示；生产 key 走代理网关（原 spec §5）
