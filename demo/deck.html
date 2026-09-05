@@ -80,12 +80,32 @@
   #toolbar button:disabled { background: #323949; cursor: not-allowed; }
   #hint { position: fixed; bottom: 20px; left: 424px; font-size: 12px;
     color: rgba(184,192,204,.55); user-select: none; pointer-events: none; }
+  /* ---- 移动端：左栏抽屉化 + 预览切换（对齐 chat/vale 的 9e6b11e 模式） ---- */
+  #ptoggle { display: none; }
+  @media (max-width: 720px) {
+    #left { right: 0; width: 100%; z-index: 30; max-height: 100vh;
+      box-shadow: 0 18px 50px rgba(0,0,0,.45); }
+    body.preview #left { transform: translateY(calc(100% - 52px)); }
+    #right { left: 0; padding: 12px; padding-top: 60px; }
+    #stage { width: min(100%, calc((100vh - 100px) * 16 / 9)); }
+    #hud { top: 10px; right: 12px; padding: 6px 12px; font-size: 12px; }
+    #toolbar { bottom: 58px; right: 12px; }
+    #toolbar button { padding: 7px 12px; font-size: 13px; }
+    #hint { display: none; }
+    #ptoggle { display: flex; align-items: center; gap: 6px; font-size: 13px;
+      color: #b8c0cc; cursor: pointer; user-select: none; }
+    body.preview #ptoggle { position: fixed; bottom: 12px; left: 50%;
+      transform: translateX(-50%); z-index: 40;
+      background: rgba(13,17,26,.72); backdrop-filter: blur(14px);
+      border: 1px solid rgba(255,255,255,.09); border-radius: 999px;
+      padding: 8px 18px; }
+  }
 </style>
 </head>
 <body>
 
 <div id="left">
-  <h1><a href="index.html">←</a> senza-wasm <small>· deck</small></h1>
+  <h1><a href="index.html">←</a> senza-wasm <small>· deck</small><span id="ptoggle">🖼 预览</span></h1>
   <div id="settings">
     <details>
       <label>预设（LLM 端点）</label>
@@ -301,6 +321,9 @@ $("inputbar").onsubmit = (e) => {
 $("input").onkeydown = (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("inputbar").requestSubmit(); }
 };
+
+// 移动端：预览切换（桌面端 #ptoggle 隐藏，不生效）
+$("ptoggle").onclick = () => document.body.classList.toggle("preview");
 
 // 外层方向键 → 转发进 iframe（输入框聚焦时不抢）
 document.addEventListener("keydown", (e) => {
