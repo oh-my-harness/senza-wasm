@@ -360,6 +360,79 @@ impl EmbeddedAgent {
             ))),
         }
     }
+
+    /// Export conversation history as facade-owned JSON:
+    /// `{"v":1,"history":[{"role":..,"text":..},...]}`. The host persists
+    /// this (localStorage / IndexedDB / file); `importSession` restores it.
+    pub fn export_session(&self) -> String {
+        let state = self.state.lock();
+        let history: Vec<serde_json::Value> = state
+            .history
+            .iter()
+            .map(crate::events::message_to_value)
+            .collect();
+        serde_json::json!({ "v": 1, "history": history }).to_string()
+    }
+
+    /// Restore a session previously produced by `exportSession`.
+    /// Replaces history; bumps the generation (discards any in-flight
+    /// writeback from a running prompt).
+    pub fn import_session(&self, json: String) -> Result<(), JsValue> {
+        let v: serde_json::Value = serde_json::from_str(&json)
+            .map_err(|e| JsValue::from_str(&format!("invalid session json: {e}")))?;
+        if v.get("v").and_then(|x| x.as_i64()) != Some(1) {
+            return Err(JsValue::from_str(
+                "unsupported session version (expected 1)",
+            ));
+        }
+        let entries = v
+            .get("history")
+            .and_then(|x| x.as_array())
+            .ok_or_else(|| JsValue::from_str("session json missing history array"))?;
+        let mut history = Vec::with_capacity(entries.len());
+        for e in entries {
+            let role = e.get("role").and_then(|x| x.as_str()).unwrap_or("unknown");
+            let text = e.get("text").and_then(|x| x.as_str()).unwrap_or("");
+            history.push(match role {
+                "user" => llm_harness_types::AgentMessage::User(llm_harness_types::UserMessage {
+                    content: vec![llm_harness_types::ContentBlock::Text { text: text.into() }],
+                    timestamp: chrono::Utc::now(),
+                }),
+                "assistant" => llm_harness_types::AgentMessage::Assistant(
+                    llm_harness_types::AssistantMessage {
+                        kind: llm_harness_types::AssistantMessageKind::FinalAnswer,
+                        message_id: String::new(),
+                        turn_id: String::new(),
+                        content: vec![llm_harness_types::ContentBlock::Text { text: text.into() }],
+                        stop_reason: None,
+                        timestamp: chrono::Utc::now(),
+                        provider: None,
+                        api: None,
+                        model: None,
+                        usage: None,
+                        error_message: None,
+                    },
+                ),
+                other => {
+                    return Err(JsValue::from_str(&format!(
+                        "session entry role '{other}' is not importable (run-internal)"
+                    )));
+                }
+            });
+        }
+        let mut state = self.state.lock();
+        state.history = history;
+        state.generation += 1;
+        Ok(())
+    }
+
+    /// Clear history. Does not interrupt a running run; the in-flight
+    /// writeback is discarded via the generation counter.
+    pub fn clear_session(&self) {
+        let mut state = self.state.lock();
+        state.history.clear();
+        state.generation += 1;
+    }
 }
 
 /// Single `LoopConfig` construction point — mirrors
@@ -405,5 +478,58 @@ fn build_config(
         follow_up_rx: None,
         retry: None,
         response_format: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gloo_timers::future::TimeoutFuture;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    async fn drain_to_end(agent: &EmbeddedAgent) {
+        for _ in 0..400 {
+            TimeoutFuture::new(25).await;
+            if agent
+                .poll()
+                .iter()
+                .any(|l| l.contains(r#""type":"agent_end""#))
+            {
+                return;
+            }
+        }
+        panic!("timeout waiting for agent_end");
+    }
+
+    #[wasm_bindgen_test]
+    async fn session_export_import_roundtrip() {
+        let agent = EmbeddedAgent::new(r#"{"provider":"mock","model":"m"}"#.into()).unwrap();
+        agent.prompt("hello".into());
+        drain_to_end(&agent).await;
+
+        let exported = agent.export_session();
+        let v: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        assert_eq!(v["v"], 1);
+        let h = v["history"].as_array().expect("history array");
+        assert_eq!(h.len(), 2, "user + assistant after one turn: {exported}");
+        assert_eq!(h[0]["role"], "user");
+        assert_eq!(h[0]["text"], "hello");
+        assert_eq!(h[1]["role"], "assistant");
+
+        let agent2 = EmbeddedAgent::new(r#"{"provider":"mock","model":"m"}"#.into()).unwrap();
+        agent2.import_session(exported.clone()).unwrap();
+        assert_eq!(agent2.export_session(), exported, "roundtrip");
+    }
+
+    #[wasm_bindgen_test]
+    async fn session_import_rejects_bad_version() {
+        let agent = EmbeddedAgent::new(r#"{"provider":"mock","model":"m"}"#.into()).unwrap();
+        let err = agent
+            .import_session(r#"{"v":99,"history":[]}"#.into())
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("unsupported session version"),
+            "got: {err:?}"
+        );
     }
 }

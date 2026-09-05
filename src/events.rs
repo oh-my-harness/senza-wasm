@@ -60,7 +60,10 @@ fn event_to_value(event: &AgentEvent) -> serde_json::Value {
         AgentEvent::MessageStart { message_id } => {
             serde_json::json!({ "type": "message_start", "message_id": message_id })
         }
-        AgentEvent::MessageUpdate { message_id, partial } => serde_json::json!({
+        AgentEvent::MessageUpdate {
+            message_id,
+            partial,
+        } => serde_json::json!({
             "type": "message_update",
             "message_id": message_id,
             "text": partial.text_content(),
@@ -123,7 +126,10 @@ fn event_to_value(event: &AgentEvent) -> serde_json::Value {
             "tool_name": tool_name,
             "args": args,
         }),
-        AgentEvent::ToolExecutionUpdate { tool_use_id, partial } => serde_json::json!({
+        AgentEvent::ToolExecutionUpdate {
+            tool_use_id,
+            partial,
+        } => serde_json::json!({
             "type": "tool_execution_update",
             "tool_use_id": tool_use_id,
             "result": progress_to_value(partial),
@@ -193,7 +199,8 @@ fn error_type(err: &AgentError) -> Option<&'static str> {
 }
 
 /// `AgentMessage` → `{role, text}` (mirror of `agent_message_to_dict`).
-fn message_to_value(msg: &AgentMessage) -> serde_json::Value {
+/// Also the export_session projection (facade-owned session JSON).
+pub(crate) fn message_to_value(msg: &AgentMessage) -> serde_json::Value {
     #[allow(unreachable_patterns)] // forward-compat catch-all for non_exhaustive
     let (role, text) = match msg {
         AgentMessage::User(m) => ("user", join_blocks_text(&m.content)),
@@ -201,10 +208,7 @@ fn message_to_value(msg: &AgentMessage) -> serde_json::Value {
         AgentMessage::ToolResult(m) => ("tool_result", join_data_blocks_text(&m.content)),
         AgentMessage::BranchSummary(m) => ("branch_summary", m.summary.clone()),
         AgentMessage::CompactionSummary(m) => ("compaction_summary", m.summary.clone()),
-        AgentMessage::Custom(m) => (
-            "custom",
-            serde_json::to_string(&m.data).unwrap_or_default(),
-        ),
+        AgentMessage::Custom(m) => ("custom", serde_json::to_string(&m.data).unwrap_or_default()),
         // non_exhaustive: future kernel variants project to unknown.
         _ => ("unknown", String::new()),
     };
@@ -331,9 +335,7 @@ mod tests {
     fn agent_end_carries_message_list() {
         let ev = AgentEvent::AgentEnd {
             new_messages: vec![AgentMessage::User(UserMessage {
-                content: vec![ContentBlock::Text {
-                    text: "q".into(),
-                }],
+                content: vec![ContentBlock::Text { text: "q".into() }],
                 timestamp: Utc::now(),
             })],
         };
