@@ -1,0 +1,334 @@
+<!doctype html>
+<!--
+  deck.html — 对话生成 HTML PPT：agent 逐页 writeSlide/deleteSlide，
+  右侧舞台实时预览，一键下载自包含 .html。多轮修改靠 history 续接。
+
+  Run:
+    wasm-pack build --target web --out-dir pkg-web
+    python3 -m http.server 8931    # from repo root
+    open http://localhost:8931/demo/deck.html
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="data:," />
+<title>senza-wasm · deck</title>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; overflow: hidden; background: #0a0d14;
+    font: 14px/1.6 -apple-system, "PingFang SC", sans-serif; color: #e8ebf0; }
+  #left { position: fixed; left: 0; top: 0; bottom: 0; width: 400px;
+    background: #10131b; border-right: 1px solid #262b36;
+    display: flex; flex-direction: column; }
+  #right { position: fixed; left: 400px; right: 0; top: 0; bottom: 0;
+    display: flex; align-items: center; justify-content: center; padding: 24px; }
+
+  h1 { font-size: 15px; padding: 14px 16px; border-bottom: 1px solid #262b36; }
+  h1 a { color: inherit; text-decoration: none; }
+  h1 small { color: #7d8590; font-weight: normal; }
+
+  #settings { padding: 10px 16px 4px; }
+  #settings label { display: block; font-size: 11px; color: #9aa3b0; margin: 8px 0 2px; }
+  #settings select, #settings input { width: 100%; font: inherit; font-size: 13px;
+    background: #0a0d14; color: #e8ebf0; border: 1px solid #323949;
+    border-radius: 6px; padding: 5px 8px; }
+  #settings details { border: 1px solid #262b36; border-radius: 8px; padding: 6px 10px; }
+  #settings summary { font-size: 12px; color: #9aa3b0; cursor: pointer; }
+  #settings p.note { font-size: 11px; color: #7d8590; margin: 8px 0 0; }
+
+  #log { flex: 1; overflow-y: auto; padding: 12px 16px; scrollbar-width: thin; }
+  .msg { margin-bottom: 10px; }
+  .msg .who { font-size: 11px; color: #7d8590; margin-bottom: 2px; }
+  .msg .body { border-radius: 8px; padding: 7px 10px; font-size: 13px;
+    white-space: pre-wrap; word-break: break-word; }
+  .msg.user .body { background: #233043; }
+  .msg.assistant .body { background: #1b2029; }
+  .msg.toolcall .body { font-family: ui-monospace, monospace; font-size: 12px;
+    background: #141a15; border: 1px dashed #2e4a33; color: #9fc7a4; }
+  .msg.toolresult .body { font-family: ui-monospace, monospace; font-size: 12px;
+    background: #141a15; border: 1px solid #2e4a33; color: #8fae94; }
+  .msg.error .body { background: #2b1313; border: 1px solid #6b1818; color: #e58c8c; }
+  .cursor { display: inline-block; width: .55em; height: 1em; background: #7d8590;
+    vertical-align: text-bottom; animation: blink 1s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  #inputbar { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #262b36; }
+  #input { flex: 1; background: #0a0d14; color: #e8ebf0; font: inherit;
+    border: 1px solid #323949; border-radius: 8px; padding: 8px 10px;
+    resize: none; height: 58px; outline: none; }
+  #input:focus { border-color: #3d5a99; }
+  #send { background: #2d6cdf; border: 0; border-radius: 8px; color: #fff;
+    padding: 0 16px; cursor: pointer; font: inherit; }
+  #send:disabled { background: #3a4152; cursor: not-allowed; }
+
+  #stage { width: min(100%, calc((100vh - 120px) * 16 / 9)); aspect-ratio: 16/9;
+    border-radius: 8px; box-shadow: 0 24px 80px rgba(0,0,0,.55);
+    border: 1px solid #262b36; overflow: hidden; position: relative; }
+  #frame { width: 100%; height: 100%; border: 0; background: #0d1017; }
+  #hud { position: fixed; top: 16px; right: 24px; display: flex; gap: 14px;
+    align-items: center; background: rgba(13,17,26,.72); backdrop-filter: blur(14px);
+    border: 1px solid rgba(255,255,255,.09); border-radius: 999px;
+    padding: 7px 18px; font-size: 13px; color: #b8c0cc; user-select: none; }
+  #busy { width: 9px; height: 9px; border-radius: 50%; background: #4a5262; transition: background .2s; }
+  #busy.on { background: #f5c76b; animation: pulse 1.1s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 5px rgba(245,199,107,.25); } }
+  #toolbar { position: fixed; bottom: 20px; right: 24px; display: flex; gap: 10px; }
+  #toolbar button { font: inherit; background: #2d6cdf; color: #fff; border: 0;
+    border-radius: 8px; padding: 8px 16px; cursor: pointer; }
+  #toolbar button.ghost { background: #323949; }
+  #toolbar button:disabled { background: #323949; cursor: not-allowed; }
+  #hint { position: fixed; bottom: 20px; left: 424px; font-size: 12px;
+    color: rgba(184,192,204,.55); user-select: none; pointer-events: none; }
+</style>
+</head>
+<body>
+
+<div id="left">
+  <h1><a href="index.html">←</a> senza-wasm <small>· deck</small></h1>
+  <div id="settings">
+    <details>
+      <summary>⚙ API 设置</summary>
+      <label>预设（OpenAI 兼容端点）</label>
+      <select id="preset">
+        <option value="https://api.openai.com/v1" selected>OpenAI 官方</option>
+        <option value="https://api.deepseek.com/v1">DeepSeek</option>
+        <option value="https://api.moonshot.cn/v1">Moonshot (Kimi)</option>
+        <option value="https://ark.cn-beijing.volces.com/api/v3">火山方舟</option>
+        <option value="https://open.bigmodel.cn/api/paas/v4">智谱 GLM</option>
+        <option value="http://localhost:11434/v1">Ollama 本地</option>
+        <option value="">自定义…</option>
+      </select>
+      <label>API base URL（留空 = 官方端点）</label>
+      <input id="baseurl" placeholder="https://api.openai.com/v1" />
+      <label>API key（只存你浏览器 localStorage）</label>
+      <input id="apikey" type="password" placeholder="sk-…" />
+      <label>model</label>
+      <input id="model" placeholder="gpt-4o-mini" />
+      <p class="note">配置全组 demo 共享；换端点/模型后本页会话重开（deck 保留）。</p>
+    </details>
+  </div>
+  <div id="log"></div>
+  <form id="inputbar">
+    <textarea id="input" placeholder="描述你要的 PPT…（Enter 发送，Shift+Enter 换行）"></textarea>
+    <button id="send" type="submit">发送</button>
+  </form>
+</div>
+
+<div id="right"><div id="stage"><iframe id="frame" title="deck preview"></iframe></div></div>
+<div id="hud"><span id="busy"></span><span id="pages">0 页</span><span id="tokens">0 tok</span></div>
+<div id="toolbar">
+  <button id="cleardeck" class="ghost" title="清空 deck 与会话">🗑 清空</button>
+  <button id="download" disabled>⬇ 下载 .html</button>
+</div>
+<div id="hint">← → 翻页 · 点击页面左右侧翻页</div>
+
+<script type="module">
+import init, { EmbeddedAgent } from "../pkg-web/senza_wasm.js";
+import { bindSettings, providerOpts } from "./common.js";
+import { Deck, makeDeckTools, buildDeckDocument } from "./deck.js";
+
+const $ = (id) => document.getElementById(id);
+const log = $("log");
+
+await init();
+
+// ---------- deck 状态（localStorage 持久化；LLM 会话另算） ----------
+const LS_KEY = "senza-deck-slides";
+function restoreDeck() {
+  try { return new Deck(JSON.parse(localStorage.getItem(LS_KEY)) || []); }
+  catch { return new Deck(); }
+}
+let deck = restoreDeck();
+
+function persist() { localStorage.setItem(LS_KEY, JSON.stringify(deck.sorted())); }
+
+function render(page) {
+  $("frame").srcdoc = buildDeckDocument(deck, page ?? 1);
+  $("pages").textContent = `${deck.slides.size} 页`;
+  $("download").disabled = !deck.slides.size;
+  persist();
+}
+render(1);
+
+// ---------- agent ----------
+const SYSTEM_PROMPT = `你是演示文稿设计师，通过工具逐页构建 HTML 幻灯片。
+
+页面规范（严格遵守）：
+- 每页一次 writeSlide 调用，index 从 1 开始连续编号。
+- html 参数是单页片段：一个顶层 <section>，全部内联样式。
+- 画布 16:9 全屏；字号用 vmin：大标题 7vmin、小标题 5vmin、正文 3.2vmin、注释 2.2vmin。
+- 配色：背景 #161a23，主文字 #e8ebf0，强调色 #8ab4f8，弱文字 #9aa3b0。
+- <section> 样式起点：width:100vw;height:100vh;box-sizing:border-box;padding:8vmin;background:#161a23;display:flex;flex-direction:column;justify-content:center
+- 每页一个观点；要点不超过 5 条；可用 display:flex 两栏（gap:6vmin）。
+- 不写 <html>/<head>/<body>/<script>，纯内容片段。
+
+工作流：
+- 用户要新 deck：先在心里规划页标题，再逐页 writeSlide。
+- 修改：writeSlide 覆盖同 index；删页：deleteSlide。
+- 每次工具结果都带当前大纲——改动后保持页码连续。
+- 完成后用一两句中文说明结构，不要复述页面内容。`;
+
+let agent = null;
+let lastSessionJson = null;
+let needsDeckContext = false; // agent 重建且 deck 非空 → 首条消息注入大纲
+
+function makeAgent() {
+  const a = new EmbeddedAgent(JSON.stringify(providerOpts({
+    systemPrompt: SYSTEM_PROMPT,
+    maxTurns: 24,
+  })));
+  makeDeckTools(deck, {
+    onWrite: (i) => render(i),
+    onDelete: () => render(1),
+  }).register(a);
+  return a;
+}
+
+function ensureAgent() {
+  if (!agent) {
+    agent = makeAgent();
+    let imported = false;
+    if (lastSessionJson) {
+      try { agent.importSession(lastSessionJson); imported = true; } catch { /* 工具轮不可导入 → 重开 */ }
+    }
+    // 会话没接上但 deck 还在：首条消息带大纲，模型拿回上下文
+    if (deck.slides.size && !imported) needsDeckContext = true;
+  }
+  return agent;
+}
+setInterval(() => { if (agent) lastSessionJson = agent.exportSession(); }, 3000);
+
+// ---------- 事件泵（结构同 chat.html，无审批分支） ----------
+let agentActive = false;
+let currentAssistantBody = null;
+
+function addMsg(cls, who, bodyText) {
+  const div = document.createElement("div");
+  div.className = `msg ${cls}`;
+  const whoEl = document.createElement("div"); whoEl.textContent = who;
+  const body = document.createElement("div"); body.className = "body";
+  body.textContent = bodyText;
+  div.append(whoEl, body);
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  return body;
+}
+const busyEl = () => {
+  const b = addMsg("assistant", "assistant", "");
+  const c = document.createElement("span"); c.className = "cursor"; b.appendChild(c);
+  return b;
+};
+
+async function pump() {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 40));
+    const lines = agent.poll();
+    for (const line of lines) handleEvent(JSON.parse(line));
+    if (!lines.length && !agentActive) break;
+  }
+}
+
+function handleEvent(ev) {
+  switch (ev.type) {
+    case "agent_start":
+      agentActive = true;
+      $("busy").classList.add("on");
+      currentAssistantBody = busyEl();
+      break;
+    case "message_start":
+      if (currentAssistantBody) currentAssistantBody.querySelector?.(".cursor")?.remove();
+      currentAssistantBody = busyEl();
+      break;
+    case "text_delta":
+      if (currentAssistantBody) {
+        currentAssistantBody.lastChild?.classList?.remove("cursor");
+        currentAssistantBody.append(ev.text);
+        log.scrollTop = log.scrollHeight;
+      }
+      break;
+    case "tool_execution_start":
+      addMsg("toolcall", "tool call", `→ ${ev.tool_name}(${ev.args ?? ""})`);
+      break;
+    case "tool_execution_end":
+      addMsg("toolresult", "tool result",
+        ev.ok ? "✓ " + (ev.result?.text ?? JSON.stringify(ev.result)) : "✗ " + (ev.error ?? "failed"));
+      break;
+    case "message_end":
+      if (currentAssistantBody) {
+        currentAssistantBody.lastChild?.classList?.remove("cursor");
+        currentAssistantBody = null;
+      }
+      break;
+    case "agent_end":
+      agentActive = false;
+      $("busy").classList.remove("on");
+      updateTokens();
+      break;
+    case "error":
+      addMsg("error", "error", `${ev.error_type ?? ""}: ${ev.message ?? JSON.stringify(ev)}`);
+      break;
+  }
+}
+
+function updateTokens() {
+  const c = JSON.parse(agent.costSnapshot());
+  $("tokens").textContent = `${(c.totalInputTokens ?? 0) + (c.totalOutputTokens ?? 0)} tok`;
+}
+
+// ---------- wiring ----------
+bindSettings({ preset: "preset", baseurl: "baseurl", apikey: "apikey", model: "model" },
+  () => { agent = null; }); // 配置变更 → 下条消息重建 agent（deck 不动）
+
+$("inputbar").onsubmit = (e) => {
+  e.preventDefault();
+  let text = $("input").value.trim();
+  if (!text) return;
+  try { ensureAgent(); } catch (err) {
+    addMsg("error", "error", String(err.message ?? err));
+    return;
+  }
+  if (needsDeckContext) {
+    // 会话是新的但 deck 有内容：注入大纲让模型接上
+    text = `（系统注入：当前 deck 已有内容，供你参考，不要复述）\n${deck.outline()}\n\n${text}`;
+    needsDeckContext = false;
+  }
+  $("input").value = "";
+  addMsg("user", "you", text);
+  agent.prompt(text);
+  pump();
+};
+$("input").onkeydown = (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("inputbar").requestSubmit(); }
+};
+
+// 外层方向键 → 转发进 iframe（输入框聚焦时不抢）
+document.addEventListener("keydown", (e) => {
+  if (/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName ?? "")) return;
+  if (e.key === "ArrowRight") $("frame").contentWindow?.postMessage({ deckGo: 1 });
+  if (e.key === "ArrowLeft") $("frame").contentWindow?.postMessage({ deckGo: -1 });
+});
+
+$("download").onclick = () => {
+  const blob = new Blob([buildDeckDocument(deck, 1)], { type: "text/html" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${(deck.slides.get(1)?.title ?? "deck").replace(/[\\/:*?"<>|]/g, "_")}.html`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+$("cleardeck").onclick = () => {
+  if (!deck.slides.size && !agent) return;
+  deck = new Deck();
+  if (agent) { agent.clearSession(); lastSessionJson = null; }
+  needsDeckContext = false;
+  render(1);
+  addMsg("assistant", "system", "deck 与会话已清空。");
+};
+
+addMsg("assistant", "system",
+  "已就绪。描述你要的演示文稿（主题、页数、受众），模型会逐页生成，右侧实时预览。\n生成后可以继续对话修改：「第 2 页太啰嗦」「加一页讲风险」「把封面换成深蓝色」。");
+</script>
+</body>
+</html>

@@ -51,6 +51,13 @@
     9 个世界工具实时改写游戏世界，渲染永不阻塞。</p>
     <div class="tags"><span class="tag">游戏宿主</span><span class="tag">9 工具</span><span class="tag">流式回复</span><span class="tag">60FPS</span></div>
   </a>
+  <a class="card" href="deck.html">
+    <div class="emoji">🖼️</div>
+    <h2>对话生成 PPT</h2>
+    <p>说一句「给我做一份 XX 介绍的 5 页 PPT」，模型逐页 writeSlide 构建 HTML 幻灯片，
+    右侧舞台实时点亮，可继续对话改单页，一键下载自包含文件离线放映。</p>
+    <div class="tags"><span class="tag">多轮修改</span><span class="tag">json_schema</span><span class="tag">逐页工具</span><span class="tag">下载</span></div>
+  </a>
 </div>
 
 <p id="cfgstate"></p>
@@ -60,7 +67,7 @@ import { loadCfg } from "./common.js";
 const cfg = loadCfg();
 const el = document.getElementById("cfgstate");
 if (cfg.apiKey || (cfg.baseUrl || "").includes("localhost"))
-  el.innerHTML = `API 已配置（<b>${cfg.model || "deepseek-chat"}</b> @ ${cfg.baseUrl || "DeepSeek 官方端点"}）—— 直接开玩；换配置进任一 demo 的 ⚙ 设置`;
+  el.innerHTML = `API 已配置（<b>${cfg.model || "deepseek-v4-flash"}</b> @ ${cfg.baseUrl || "DeepSeek 官方端点"}）—— 直接开玩；换配置进任一 demo 的 ⚙ 设置`;
 else
   el.textContent = "还没配置 API：进入任一 demo 点右上角 ⚙ 填一次（key 只存你浏览器 localStorage）";
 </script>

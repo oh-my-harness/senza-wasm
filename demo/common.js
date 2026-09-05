@@ -19,8 +19,8 @@ export function providerOpts(extra = {}) {
   return {
     provider: "openai",
     apiKey: cfg.apiKey || "",
-    baseUrl: cfg.baseUrl || undefined,
-    model: cfg.model || "deepseek-chat",
+    baseUrl: cfg.baseUrl || "https://api.deepseek.com/v1",  // 犯懒默认：DeepSeek
+    model: cfg.model || "deepseek-v4-flash",
     ...extra,
   };
 }
@@ -30,9 +30,9 @@ export function providerOpts(extra = {}) {
 export function bindSettings(fieldIds, onChange) {
   const cfg = loadCfg();
   const el = (k) => document.getElementById(fieldIds[k]);
-  el("baseurl").value = cfg.baseUrl || "";
+  el("baseurl").value = cfg.baseUrl || "https://api.deepseek.com/v1";
   el("apikey").value = cfg.apiKey || "";
-  el("model").value = cfg.model || "deepseek-chat";
+  el("model").value = cfg.model || "deepseek-v4-flash";
   el("preset").onchange = () => {
     const u = el("preset").value;
     if (u) el("baseurl").value = u;
@@ -43,7 +43,7 @@ export function bindSettings(fieldIds, onChange) {
       saveCfg({
         baseUrl: el("baseurl").value.trim(),
         apiKey: el("apikey").value.trim(),
-        model: el("model").value.trim() || "deepseek-chat",
+        model: el("model").value.trim() || "deepseek-v4-flash",
       });
       onChange?.();
     });
