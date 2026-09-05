@@ -14,6 +14,12 @@ pub mod tools;
 
 use wasm_bindgen::prelude::*;
 
+/// Better panic messages in the browser/Node console (debug + release).
+#[wasm_bindgen(start)]
+fn start() {
+    console_error_panic_hook::set_once();
+}
+
 /// Crate version, surfaced to JS for diagnostics.
 #[wasm_bindgen]
 pub fn version() -> String {

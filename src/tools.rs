@@ -7,10 +7,10 @@
 //!   surfaces `tool_call` events and the host completes them via
 //!   `EmbeddedAgent::resolve_tool` — no JS closure crosses the boundary.
 
-use std::sync::Arc;
-use llm_harness_types::{DataBlock, Tool, ToolContext, ToolFailure, ToolFuture, ToolResult};
-use wasm_bindgen::prelude::*;
 use futures::StreamExt;
+use llm_harness_types::{DataBlock, Tool, ToolContext, ToolFailure, ToolFuture, ToolResult};
+use std::sync::Arc;
+use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
 /// A tool backed by a JS async callback:
@@ -52,24 +52,24 @@ impl Tool for JsTool {
         &self.schema
     }
 
-    fn execute<'a>(
-        &'a self,
-        args: serde_json::Value,
-        _ctx: &'a ToolContext,
-    ) -> ToolFuture<'a> {
+    fn execute<'a>(&'a self, args: serde_json::Value, _ctx: &'a ToolContext) -> ToolFuture<'a> {
         let callback = self.callback.clone();
         Box::pin(async move {
             let args_js = JsValue::from_str(&args.to_string());
-            let ret = callback
-                .call1(&JsValue::NULL, &args_js)
-                .map_err(|e| ToolFailure::new("execution_error", format!("JS callback failed: {e:?}")))?;
+            let ret = callback.call1(&JsValue::NULL, &args_js).map_err(|e| {
+                ToolFailure::new("execution_error", format!("JS callback failed: {e:?}"))
+            })?;
             let promise = js_sys::Promise::from(ret);
-            let out = JsFuture::from(promise)
-                .await
-                .map_err(|e| ToolFailure::new("execution_error", format!("JS promise rejected: {e:?}")))?;
+            let out = JsFuture::from(promise).await.map_err(|e| {
+                ToolFailure::new("execution_error", format!("JS promise rejected: {e:?}"))
+            })?;
             let out_str = out.as_string().unwrap_or_default();
-            let value: serde_json::Value = serde_json::from_str(&out_str)
-                .map_err(|e| ToolFailure::new("invalid_result", format!("ToolResult JSON parse failed: {e}")))?;
+            let value: serde_json::Value = serde_json::from_str(&out_str).map_err(|e| {
+                ToolFailure::new(
+                    "invalid_result",
+                    format!("ToolResult JSON parse failed: {e}"),
+                )
+            })?;
             let text = value
                 .get("text")
                 .and_then(|t| t.as_str())
@@ -91,34 +91,42 @@ impl Tool for JsTool {
     }
 }
 
-/// Pump-path placeholder: `execute` awaits the channel until the host
-/// calls `resolve_tool(call_id, result_json)` (agent pushes the result
-/// JSON into the channel). The receiver is handed over on first execute
-/// (take semantics): one tool call consumes one resolution. Channel
-/// close (agent-side drop) = cancellation.
+/// Pump-path placeholder: `execute` creates a fresh one-shot channel and
+/// registers its receiver under the LLM-assigned `tool_use_id` that the
+/// loop passes in `ToolContext`; the host answers with
+/// `resolve_tool(tool_use_id, result_json)`, which the facade routes to
+/// the awaiting receiver. No JS closure crosses the boundary.
 pub struct PendingTool {
     name: String,
     description: String,
     schema: serde_json::Value,
-    call_id: String,
-    rx: parking_lot::Mutex<Option<futures::channel::mpsc::Receiver<String>>>,
+    /// `tool_use_id` → sender for the in-flight call. `execute` inserts;
+    /// `resolve` (via the facade) removes and fires.
+    pending: parking_lot::Mutex<
+        std::collections::HashMap<String, futures::channel::mpsc::Sender<String>>,
+    >,
 }
 
 impl PendingTool {
-    pub fn new(
-        name: String,
-        description: String,
-        schema: serde_json::Value,
-        call_id: String,
-        rx: futures::channel::mpsc::Receiver<String>,
-    ) -> Arc<Self> {
+    pub fn new(name: String, description: String, schema: serde_json::Value) -> Arc<Self> {
         Arc::new(Self {
             name,
             description,
             schema,
-            call_id,
-            rx: parking_lot::Mutex::new(Some(rx)),
+            pending: parking_lot::Mutex::new(std::collections::HashMap::new()),
         })
+    }
+
+    /// Route `result_json` to the execute awaiting `tool_use_id`.
+    pub fn resolve(&self, tool_use_id: &str, result_json: String) -> Result<(), String> {
+        match self.pending.lock().remove(tool_use_id) {
+            Some(mut tx) => tx
+                .try_send(result_json)
+                .map_err(|e| format!("resolve failed: {e}")),
+            None => Err(format!(
+                "unknown or already-resolved tool_use_id '{tool_use_id}'"
+            )),
+        }
     }
 }
 
@@ -135,21 +143,12 @@ impl Tool for PendingTool {
         &self.schema
     }
 
-    fn execute<'a>(
-        &'a self,
-        _args: serde_json::Value,
-        _ctx: &'a ToolContext,
-    ) -> ToolFuture<'a> {
-        let call_id = self.call_id.clone();
-        // One tool call = one receiver handoff; a second execute on the
-        // same PendingTool (should not happen — the loop re-registers per
-        // call) degrades to a cancelled failure rather than deadlocking.
-        let mut guard = self.rx.lock();
-        let mut rx = guard.take().unwrap_or_else(|| {
-            let (_tx, rx) = futures::channel::mpsc::channel::<String>(1);
-            rx
-        });
-        drop(guard);
+    fn execute<'a>(&'a self, _args: serde_json::Value, ctx: &'a ToolContext) -> ToolFuture<'a> {
+        // Fresh one-shot channel per call, keyed by the LLM-assigned id;
+        // `PendingTool::resolve` fires it when the host answers.
+        let (tx, mut rx) = futures::channel::mpsc::channel::<String>(1);
+        self.pending.lock().insert(ctx.tool_use_id.clone(), tx);
+        let call_id = ctx.tool_use_id.clone();
         Box::pin(async move {
             match rx.next().await {
                 Some(result_json) => parse_pump_result(&call_id, &result_json),
@@ -162,8 +161,12 @@ impl Tool for PendingTool {
     }
 }
 fn parse_pump_result(call_id: &str, result_json: &str) -> Result<ToolResult, ToolFailure> {
-    let value: serde_json::Value = serde_json::from_str(result_json)
-        .map_err(|e| ToolFailure::new("invalid_result", format!("resolveTool JSON parse failed: {e}")))?;
+    let value: serde_json::Value = serde_json::from_str(result_json).map_err(|e| {
+        ToolFailure::new(
+            "invalid_result",
+            format!("resolveTool JSON parse failed: {e}"),
+        )
+    })?;
     let text = value
         .get("text")
         .and_then(|t| t.as_str())
@@ -209,7 +212,12 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn js_tool_trait_surface() {
         let cb = js_sys::Function::new_no_args("return Promise.resolve('{\"text\":\"ok\"}');");
-        let tool = JsTool::new("t".into(), "d".into(), serde_json::json!({"type":"object"}), cb);
+        let tool = JsTool::new(
+            "t".into(),
+            "d".into(),
+            serde_json::json!({"type":"object"}),
+            cb,
+        );
         assert_eq!(Tool::name(&tool), "t");
         assert_eq!(Tool::description(&tool), "d");
         assert_eq!(
@@ -220,19 +228,20 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn pending_tool_resolves_after_host_reply() {
-        let (mut tx, rx) = futures::channel::mpsc::channel::<String>(1);
-        let tool = PendingTool::new(
-            "echo".into(),
-            "pump echo".into(),
-            serde_json::json!({}),
-            "call-1".into(),
-            rx,
-        );
+        let tool = PendingTool::new("echo".into(), "pump echo".into(), serde_json::json!({}));
         assert_eq!(Tool::name(tool.as_ref()), "echo");
-        tx.try_send("{\"text\":\"pong\"}".into()).unwrap();
+        // execute parks a one-shot sender under the ctx tool_use_id;
+        // resolve() must fire exactly that channel.
         let ctx = make_ctx();
         let fut = Tool::execute(tool.as_ref(), serde_json::json!({}), &ctx);
+        tool.resolve("c1", "{\"text\":\"pong\"}".into()).unwrap();
         let result = futures::executor::block_on(fut).unwrap();
         assert_eq!(result.model_content.len(), 1);
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn pending_tool_resolve_unknown_id_errors() {
+        let tool = PendingTool::new("echo".into(), "pump echo".into(), serde_json::json!({}));
+        assert!(tool.resolve("nope", "{}".into()).is_err());
     }
 }

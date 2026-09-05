@@ -14,12 +14,12 @@ use wasm_bindgen::prelude::*;
 
 use llm_harness_loop::{DefaultConvertToLlm, FinalAnswerMode, LoopConfig, agent_loop};
 use llm_harness_types::{
-    AgentContext, AgentEvent, RunContext, RunRequest, StreamOptions, ToolExecutionMode,
+    AgentContext, AgentEvent, RunContext, RunRequest, StreamOptions, Tool, ToolExecutionMode,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::events::event_to_json;
-use crate::tools::{JsTool, PendingTool};
+use crate::tools::JsTool;
 
 pub(crate) struct AgentState {
     pub queue: Vec<String>,
@@ -33,9 +33,9 @@ pub(crate) struct AgentState {
     /// the run's captured generation matches (clearSession mid-run drops
     /// the stale merge).
     pub generation: u64,
-    /// Pump tools: call_id → result channel. `resolve_tool` pushes here;
-    /// the PendingTool's receiver (inside the Tool) awaits it.
-    pub pump_tx: std::collections::HashMap<String, futures::channel::mpsc::Sender<String>>,
+    /// Pump tools by name; `resolve_tool` routes via PendingTool::resolve
+    /// (keyed by the LLM-assigned tool_use_id, not a facade uuid).
+    pub pump_by_name: std::collections::HashMap<String, Arc<crate::tools::PendingTool>>,
 }
 
 impl AgentState {
@@ -47,7 +47,7 @@ impl AgentState {
             running: false,
             history: Vec::new(),
             generation: 0,
-            pump_tx: std::collections::HashMap::new(),
+            pump_by_name: std::collections::HashMap::new(),
         }
     }
 }
@@ -71,7 +71,11 @@ pub struct EmbeddedAgent {
 /// One preset in a mock conversation script (constructor JSON only;
 /// not part of the public API surface).
 #[derive(serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 enum MockSpec {
     Text {
         text: String,
@@ -90,16 +94,16 @@ struct AgentOpts {
     /// `mock` (test facade) or `openai`.
     #[serde(default = "default_provider")]
     provider: String,
-    #[serde(default)]
+    #[serde(default, rename = "apiKey")]
     api_key: String,
-    #[serde(default)]
+    #[serde(default, rename = "baseUrl")]
     base_url: Option<String>,
     model: String,
-    #[serde(default)]
+    #[serde(default, rename = "systemPrompt")]
     system_prompt: Option<String>,
-    #[serde(default = "default_max_tokens")]
+    #[serde(default = "default_max_tokens", rename = "maxTokens")]
     max_tokens: u32,
-    #[serde(default = "default_max_turns")]
+    #[serde(default = "default_max_turns", rename = "maxTurns")]
     max_turns: u32,
     #[serde(default)]
     temperature: Option<f32>,
@@ -196,6 +200,7 @@ impl EmbeddedAgent {
     /// with `null` the tool becomes a pump placeholder: the loop surfaces
     /// `tool_execution_start` events and the host must call
     /// `resolve_tool(toolUseId, resultJson)`.
+    #[wasm_bindgen(js_name = registerTool)]
     pub fn register_tool(
         &self,
         name: String,
@@ -213,16 +218,15 @@ impl EmbeddedAgent {
                     .push(Arc::new(JsTool::new(name, description, schema, cb)));
             }
             None => {
-                // Pump placeholder. The loop keys tool calls by tool_use_id
-                // (the LLM-assigned id), so the placeholder is created
-                // per-registration with a fresh channel; resolve_tool
-                // addresses it by tool_use_id.
-                let call_id = uuid::Uuid::new_v4().to_string();
-                let (tx, rx) = futures::channel::mpsc::channel::<String>(1);
-                state.pump_tx.insert(call_id.clone(), tx);
+                // Pump placeholder. resolve_tool addresses calls by the
+                // LLM-assigned tool_use_id (surfaced on the
+                // tool_execution_start event); PendingTool::execute parks
+                // a one-shot channel under that id when the loop calls it.
+                let tool = crate::tools::PendingTool::new(name, description, schema);
                 state
-                    .tools
-                    .push(PendingTool::new(name, description, schema, call_id, rx));
+                    .pump_by_name
+                    .insert(tool.name().to_string(), tool.clone());
+                state.tools.push(tool);
             }
         }
         Ok(())
@@ -342,28 +346,32 @@ impl EmbeddedAgent {
     }
 
     /// Whether a run is currently in flight.
+    #[wasm_bindgen(js_name = isRunning)]
     pub fn is_running(&self) -> bool {
         self.state.lock().running
     }
 
-    /// Resolve a pump tool call: push `result_json` into the channel the
-    /// pending tool's `execute` is awaiting. `tool_use_id` is the id from
-    /// the `tool_execution_start` event.
+    /// Resolve a pump tool call. `tool_use_id` is the LLM-assigned id from
+    /// the `tool_execution_start` event; routing goes through the
+    /// PendingTool registered under the tool's name.
+    #[wasm_bindgen(js_name = resolveTool)]
     pub fn resolve_tool(&self, tool_use_id: String, result_json: String) -> Result<(), JsValue> {
-        let mut state = self.state.lock();
-        match state.pump_tx.remove(&tool_use_id) {
-            Some(mut tx) => tx
-                .try_send(result_json)
-                .map_err(|e| JsValue::from_str(&format!("resolve_tool failed: {e}"))),
-            None => Err(JsValue::from_str(&format!(
-                "resolve_tool: unknown or already-resolved tool_use_id '{tool_use_id}'"
-            ))),
+        let state = self.state.lock();
+        // A pending id lives in exactly one PendingTool; try each.
+        for tool in state.pump_by_name.values() {
+            if tool.resolve(&tool_use_id, result_json.clone()).is_ok() {
+                return Ok(());
+            }
         }
+        Err(JsValue::from_str(&format!(
+            "resolve_tool: unknown or already-resolved tool_use_id '{tool_use_id}'"
+        )))
     }
 
     /// Export conversation history as facade-owned JSON:
     /// `{"v":1,"history":[{"role":..,"text":..},...]}`. The host persists
     /// this (localStorage / IndexedDB / file); `importSession` restores it.
+    #[wasm_bindgen(js_name = exportSession)]
     pub fn export_session(&self) -> String {
         let state = self.state.lock();
         let history: Vec<serde_json::Value> = state
@@ -377,6 +385,7 @@ impl EmbeddedAgent {
     /// Restore a session previously produced by `exportSession`.
     /// Replaces history; bumps the generation (discards any in-flight
     /// writeback from a running prompt).
+    #[wasm_bindgen(js_name = importSession)]
     pub fn import_session(&self, json: String) -> Result<(), JsValue> {
         let v: serde_json::Value = serde_json::from_str(&json)
             .map_err(|e| JsValue::from_str(&format!("invalid session json: {e}")))?;
@@ -428,6 +437,7 @@ impl EmbeddedAgent {
 
     /// Clear history. Does not interrupt a running run; the in-flight
     /// writeback is discarded via the generation counter.
+    #[wasm_bindgen(js_name = clearSession)]
     pub fn clear_session(&self) {
         let mut state = self.state.lock();
         state.history.clear();
@@ -563,6 +573,57 @@ mod tests {
             "second request must carry first-turn history ({} vs {})",
             count(&reqs[0]),
             count(&reqs[1]),
+        );
+    }
+
+    /// maxTurns guard (M1 spec): the facade aborts the run and surfaces a
+    /// `resource_limit` error once TurnStart count exceeds the option.
+    /// Also pins the camelCase `maxTurns` rename — serde silently ignored
+    /// the JS-style key before, leaving the default of 16 in place.
+    #[wasm_bindgen_test]
+    async fn max_turns_guard_aborts_with_resource_limit() {
+        let agent = EmbeddedAgent::new(
+            r#"{"provider":"mock","model":"m","maxTurns":1,"mockScript":[
+                {"kind":"tool_use","toolUseId":"t1","name":"e","args":"{}"},
+                {"kind":"tool_use","toolUseId":"t2","name":"e","args":"{}"},
+                {"kind":"tool_use","toolUseId":"t3","name":"e","args":"{}"}
+            ]}"#
+            .into(),
+        )
+        .unwrap();
+        // Closure tool (not pump): the guard test needs turns to advance
+        // without a host resolving pump calls.
+        let cb = js_sys::Function::new_no_args("return Promise.resolve('{\"text\":\"ok\"}')");
+        agent
+            .register_tool(
+                "e".into(),
+                "d".into(),
+                r#"{"type":"object"}"#.into(),
+                Some(cb),
+            )
+            .unwrap();
+        agent.prompt("go".into());
+
+        let mut saw_limit = false;
+        let mut saw_end = false;
+        for _ in 0..400 {
+            TimeoutFuture::new(25).await;
+            for line in agent.poll() {
+                if line.contains(r#""error_type":"resource_limit""#) {
+                    saw_limit = true;
+                }
+                if line.contains(r#""type":"agent_end""#) {
+                    saw_end = true;
+                }
+            }
+            if saw_limit && saw_end {
+                break;
+            }
+        }
+        assert!(saw_limit, "resource_limit error must be surfaced");
+        assert!(
+            saw_end,
+            "run must terminate (agent_end) after the guard fires"
         );
     }
 }
