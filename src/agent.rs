@@ -351,10 +351,21 @@ fn parse_opts(opts_json: String) -> Result<AgentOpts, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("invalid createAgent options: {e}")))
 }
 
+/// baseUrl 容错：OpenAI 兼容端点约定传站点根，用户习惯性带 `/v1`
+/// （甚至 `/v1/`）时剥掉，避免拼出 `/v1/v1/chat/completions` → 404。
+fn normalize_openai_base(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    trimmed
+        .strip_suffix("/v1")
+        .map(str::to_owned)
+        .unwrap_or_else(|| trimmed.to_owned())
+}
+
 #[wasm_bindgen]
 impl EmbeddedAgent {
     /// Create an agent from a JSON options string:
-    /// `{provider, apiKey, baseUrl?, model, systemPrompt?, maxTokens?, maxTurns?, temperature?}`.
+    /// `{provider: "openai"|"anthropic"|"mock", apiKey, baseUrl?, model, systemPrompt?, maxTokens?, maxTurns?, temperature?}`.
+    /// OpenAI 兼容端点的 baseUrl 为站点根（如 https://api.deepseek.com），带 `/v1` 会自动剥掉。
     #[wasm_bindgen(constructor)]
     pub fn new(opts_json: String) -> Result<EmbeddedAgent, JsValue> {
         let mut opts = parse_opts(opts_json)?;
@@ -391,7 +402,18 @@ impl EmbeddedAgent {
                 Ok(Self::new_with_client(client, opts))
             }
             "openai" => {
+                // chat_path 固定为 /v1/chat/completions，baseUrl 须为站点根
+                // （如 https://api.deepseek.com），带 /v1 会拼出 /v1/v1/… → 404
                 let mut builder = llm_harness_loop::OpenAIProvider::builder(opts.api_key.clone());
+                if let Some(url) = &opts.base_url {
+                    builder = builder.base_url(normalize_openai_base(url));
+                }
+                let client: Arc<dyn llm_adapter::provider::Provider> = Arc::new(builder.build());
+                Ok(Self::new_with_client(client, opts))
+            }
+            "anthropic" => {
+                let mut builder =
+                    llm_harness_loop::AnthropicProvider::builder(opts.api_key.clone());
                 if let Some(url) = &opts.base_url {
                     builder = builder.base_url(url.clone());
                 }
@@ -399,7 +421,7 @@ impl EmbeddedAgent {
                 Ok(Self::new_with_client(client, opts))
             }
             other => Err(JsValue::from_str(&format!(
-                "unknown provider '{other}' (expected 'openai' or 'mock')"
+                "unknown provider '{other}' (expected 'openai', 'anthropic' or 'mock')"
             ))),
         }
     }
