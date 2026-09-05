@@ -50,8 +50,9 @@ jobs:
       - run: wasm-pack build --target web --out-dir pkg-web
       - name: assemble site
         run: |
-          mkdir -p _site/demo
-          cp -r demo/index.html _site/demo/
+          cp -r demo _site_demo
+          mkdir -p _site
+          mv _site_demo _site/demo
           cp -r pkg-web _site/pkg-web
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
