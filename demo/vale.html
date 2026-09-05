@@ -101,6 +101,15 @@
   #hint { position: fixed; bottom: 24px; right: 24px; font-size: 12px;
     color: rgba(184,192,204,0.65); user-select: none; text-align: right;
     line-height: 1.7; pointer-events: none; z-index: -1; }
+  /* 移动端：聊天框常驻（没有物理键盘，Enter 开聊天不可用） */
+  @media (max-width: 720px), (pointer: coarse) {
+    #console.hidden { transform: none; opacity: 1; pointer-events: auto; }
+    #hint { display: none; }
+    #console { width: calc(100vw - 24px); left: 12px; bottom: 12px;
+      max-height: 42vh; }
+    #hud span:last-child { display: none; } /* "Enter 聊天" 提示无意义 */
+    canvas { border-radius: 0; }
+  }
 </style>
 </head>
 <body>
@@ -441,6 +450,11 @@ function step(now) {
     player.y = Math.min(Math.max(player.y + dy * inv * sp, 1), ROWS);
     player.dx = dx; player.dy = dy;
     player.squash = Math.min(0.6, player.squash + dt * 4);
+  } else if (touchDir) {
+    player.x = Math.min(Math.max(player.x + touchDir.dx * sp, 1), COLS);
+    player.y = Math.min(Math.max(player.y + touchDir.dy * sp, 1), ROWS);
+    player.dx = touchDir.dx; player.dy = touchDir.dy;
+    player.squash = Math.min(0.6, player.squash + dt * 4);
   } else player.squash = Math.max(0, player.squash - dt * 5);
 
   // creatures wander
@@ -474,6 +488,23 @@ function step(now) {
   requestAnimationFrame(step);
 }
 requestAnimationFrame(step);
+
+// 触屏：在画布上拖动 = 朝拖动方向移动（移动端 WASD 不可用）。
+// touchmove 只记录方向向量（死区 18px），实际移动在 step 里按 dt 走。
+let touchVec = null, touchDir = null;
+canvas.addEventListener("touchstart", (e) => {
+  const t = e.touches[0];
+  touchVec = { x: t.clientX, y: t.clientY };
+  touchDir = null;
+}, { passive: true });
+canvas.addEventListener("touchmove", (e) => {
+  if (!touchVec) return;
+  const t = e.touches[0];
+  const dx = t.clientX - touchVec.x, dy = t.clientY - touchVec.y;
+  touchDir = Math.hypot(dx, dy) > 18 ? { dx: Math.sign(dx), dy: Math.sign(dy) } : null;
+  e.preventDefault();
+}, { passive: false });
+canvas.addEventListener("touchend", () => { touchVec = touchDir = null; }, { passive: true });
 
 // ======================= Agent（senza-wasm embed）=======================
 await init();
