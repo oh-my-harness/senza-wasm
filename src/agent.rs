@@ -26,6 +26,13 @@ pub(crate) struct AgentState {
     pub abort: CancellationToken,
     pub tools: Vec<Arc<dyn llm_harness_types::Tool>>,
     pub running: bool,
+    /// Full conversation history: everything the next prompt must carry.
+    /// During a run, `history + [current user msg]` is what the loop sees.
+    pub history: Vec<llm_harness_types::AgentMessage>,
+    /// Bumped on every prompt/clear/import; history writeback only when
+    /// the run's captured generation matches (clearSession mid-run drops
+    /// the stale merge).
+    pub generation: u64,
     /// Pump tools: call_id → result channel. `resolve_tool` pushes here;
     /// the PendingTool's receiver (inside the Tool) awaits it.
     pub pump_tx: std::collections::HashMap<String, futures::channel::mpsc::Sender<String>>,
@@ -38,6 +45,8 @@ impl AgentState {
             abort: CancellationToken::new(),
             tools: Vec::new(),
             running: false,
+            history: Vec::new(),
+            generation: 0,
             pump_tx: std::collections::HashMap::new(),
         }
     }
@@ -126,14 +135,20 @@ impl EmbeddedAgent {
     }
 }
 
+/// Parse the constructor options JSON (single parse point; tests and
+/// later tasks reuse it with an injected client).
+fn parse_opts(opts_json: String) -> Result<AgentOpts, JsValue> {
+    serde_json::from_str(&opts_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid createAgent options: {e}")))
+}
+
 #[wasm_bindgen]
 impl EmbeddedAgent {
     /// Create an agent from a JSON options string:
     /// `{provider, apiKey, baseUrl?, model, systemPrompt?, maxTokens?, maxTurns?, temperature?}`.
     #[wasm_bindgen(constructor)]
     pub fn new(opts_json: String) -> Result<EmbeddedAgent, JsValue> {
-        let mut opts: AgentOpts = serde_json::from_str(&opts_json)
-            .map_err(|e| JsValue::from_str(&format!("invalid createAgent options: {e}")))?;
+        let mut opts = parse_opts(opts_json)?;
         match opts.provider.as_str() {
             "mock" => {
                 let responses = opts
@@ -214,25 +229,54 @@ impl EmbeddedAgent {
     }
 
     /// Start one run with `text` as the user message. Returns immediately;
-    /// drain events with `poll()`.
+    /// drain events with `poll()`. The conversation continues: the loop
+    /// receives `history + [user msg]` — the kernel's `agent_loop` does NOT
+    /// read `config.run.initial_messages` (harness-layer responsibility,
+    /// see M1 spec §1), so the caller must inject into ctx.
     pub fn prompt(&self, text: String) {
-        let client = self.deps.client.clone();
-        let model = self.deps.model.clone();
-        let max_tokens = self.deps.max_tokens;
-        let temperature = self.deps.temperature;
-        let system_prompt = self.deps.system_prompt.clone();
-        let max_turns = self.deps.max_turns;
+        let (client, model, max_tokens, temperature, system_prompt, max_turns) = {
+            let d = &self.deps;
+            (
+                d.client.clone(),
+                d.model.clone(),
+                d.max_tokens,
+                d.temperature,
+                d.system_prompt.clone(),
+                d.max_turns,
+            )
+        };
         let state = self.state.clone();
-        let tools = state.lock().tools.clone();
-        let abort = state.lock().abort.clone();
-
-        state.lock().running = true;
+        let mut guard = state.lock();
+        if guard.running {
+            guard.queue.push(
+                serde_json::json!({
+                    "type": "error",
+                    "message": "prompt() called while a run is in flight",
+                    "error_type": "busy",
+                })
+                .to_string(),
+            );
+            return;
+        }
+        let user_msg = llm_harness_types::AgentMessage::User(llm_harness_types::UserMessage {
+            content: vec![llm_harness_types::ContentBlock::Text { text }],
+            timestamp: chrono::Utc::now(),
+        });
+        let mut history = guard.history.clone();
+        history.push(user_msg.clone());
+        guard.generation += 1;
+        let generation = guard.generation;
+        guard.running = true;
+        let tools = guard.tools.clone();
+        let abort = guard.abort.clone();
+        drop(guard);
 
         wasm_bindgen_futures::spawn_local(async move {
-            let request = RunRequest::from_text(text);
+            // Metadata only; the kernel loop ignores initial_messages.
+            let request = RunRequest::default();
             let ctx = AgentContext {
                 system_prompt,
-                messages: vec![],
+                messages: history, // history + [user_msg] — the injection fix
             };
             let config = build_config(
                 &request,
@@ -245,6 +289,10 @@ impl EmbeddedAgent {
             let stream = agent_loop(client, ctx, config);
             futures::pin_mut!(stream);
             let mut turns_started = 0u32;
+            // Writeback payload: the user msg + everything the loop emits
+            // as new_messages (incremental, excludes the initial user msg —
+            // kernel loop_fn.rs:264).
+            let mut merged = vec![user_msg];
             while let Some(event) = stream.next().await {
                 if matches!(event, AgentEvent::TurnStart { .. }) {
                     turns_started += 1;
@@ -260,14 +308,25 @@ impl EmbeddedAgent {
                         abort.cancel();
                     }
                 }
+                if let AgentEvent::AgentEnd { new_messages } = &event {
+                    merged.extend(new_messages.iter().cloned());
+                }
+                // Error does NOT terminate consumption: the kernel contract
+                // guarantees AgentEnd arrives right after (types/events.rs:96).
+                // Half-finished content is never emitted on the error path,
+                // so `merged` stays clean ("宁可丢半轮，不可脏历史").
                 let done = matches!(event, AgentEvent::AgentEnd { .. });
-                let err = matches!(event, AgentEvent::Error(_));
                 state.lock().queue.push(event_to_json(&event));
-                if done || err {
+                if done {
                     break;
                 }
             }
-            state.lock().running = false;
+            let mut st = state.lock();
+            st.running = false;
+            if st.generation == generation {
+                st.history = merged;
+            }
+            // generation mismatch: clear/import happened mid-run — discard.
         });
     }
 
