@@ -51,28 +51,30 @@ spec：`docs/superpowers/specs/2026-09-05-senza-wasm-session-core-design.md`
 | 浏览器真机冒烟（headless Chromium） | ✅ | spec §4；手动门，不进 CI；Edge 152 实测 PASS，`--target web`（commit b6e6955） |
 | GitHub 远端仓库 + CI 首跑 | ⬜ | 前提项；本地提交待推送（含 `fix/wasm-tool-progress-spawn` 上游修复合入后重 pin） |
 
-## M2 — config 透传 + 成本 + npm 包（M1 后）
+## M2 — config 透传 + 成本（已完成，spec 见 2026-09-05-senza-wasm-m2-m3）
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| `responseFormat`（structured output）透传 | ⬜ | LoopConfig 已有字段，AgentOpts 加一行 |
-| `finalAnswerMode` 透传 | ⬜ | 同上 |
-| `costSnapshot()`（UsageLedger/CostAggregate） | ⬜ | 事件流已带 usage，只差累计快照 |
-| `stream_timeout_ms` 真 key 实测 | ⬜ | M1 落地后才有意义 |
-| `npm/` 包裹层：判别联合类型 + `AgentEvent` TS 类型 | ⬜ | 原 spec §4.2 |
-| `.d.ts` 完整 + `tsc --strict` | ⬜ | 原 spec §4.4 |
+| `responseFormat`（structured output）透传 | ✅ | json_object / json_schema{name,schema,strict} |
+| `finalAnswerMode` 透传 | ✅ | heuristic / required_tool / tool_with_text_fallback |
+| `thinkingLevel` / `streamIdleTimeoutMs` 透传 | ✅ | off…xhigh / budget:N；非法 thinkingLevel 报错 |
+| `costSnapshot()` | ✅ | 门面自累计 token（不乘价格），message_id 去重；clear 不重置 |
+| mockScript usage 注入 | ✅ | `with_reported_usage` 喂测试 |
+| `stream_timeout_ms` 真 key 实测 | ⬜ | 需真实 provider key，手动验收另行走查 |
+| npm/ 包裹层：判别联合类型 + `AgentEvent` TS 类型 | ⬜ | 独立 spec（类型层设计 + 双产物 + publish 流水线一并） |
+| `.d.ts` 完整 + `tsc --strict` | ⬜ | 同上，随 npm 包 |
 | wasm-pack 双产物 CI（bundler + nodejs） | ⬜ | 当前 ci.yml 只构建 nodejs |
 | npm 发布流水线（包名/scope 待定） | ⬜ | 版本跟随内核 rev，`0.x` 起步 |
 | 浏览器 demo（单页 chat + 一个工具） | ⬜ | M1 冒烟 html 可作底子 |
 | `poll()` 返回 `string[]` vs `ArrayBuffer` 定夺 | ⬜ | 等 npm wrapper 类型层实测吞吐再议 |
 
-## M3 — 工具审批门（M2 后）
+## M3 — 工具审批门（已完成，spec 同 M2 文档）
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| `registerTool` 加 `approval: "auto" \| "manual"` | ⬜ | manual 时 tool_execution_start 暂停，`approveToolCall(id, allow)` 决定 |
-| 基于 HookedTool `BeforeToolCallHook`（Allow/Deny） | ⬜ | 内核已有，纯 Rust，无上游改动 |
-| 审批流冒烟（approve / deny / 超时） | ⬜ | 事件序列断言 |
+| `registerToolWithOptions` + `approveToolCall(id, allow)` | ✅ | `{approval:"manual"}`；与 pump 正交组合 |
+| 基于 HookedTool `BeforeToolCallHook`（Allow/Deny） | ✅ | ApprovalGate 停泊 oneshot；deny→`denied_by_host` failure（LLM 可见） |
+| 审批流冒烟（approve / deny / 未知 id） | ✅ | node 3 段 + 浏览器 deny 段全过；超时=不设内核超时，idle/maxTurns/cancel 兜底（设计决策） |
 
 ## M4 — loop_safety 策略族（节奏取决于上游）
 

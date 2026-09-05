@@ -58,8 +58,16 @@ const agent = new EmbeddedAgent(JSON.stringify({
   apiKey: "...",        // 浏览器端仅限开发/演示——生产必须走网关代理
   model: "gpt-4o-mini",
   systemPrompt: "You are helpful.",
-  maxTurns: 16,         // 门面级守卫；超出即中止，
-                        // 发出 error 事件，error_type 为 "resource_limit"
+  maxTurns: 16,          // 门面级守卫；超出即中止，
+                         // 发出 error 事件，error_type 为 "resource_limit"
+  // —— M2 透传项 ——
+  responseFormat: { kind: "json_object" },          // 或
+  // responseFormat: { kind: "json_schema", name: "out",
+  //   schema: {…}, strict: true },
+  finalAnswerMode: "required_tool",  // heuristic（默认）| required_tool
+                                     // | tool_with_text_fallback
+  thinkingLevel: "high",             // off|minimal|low|medium|high|xhigh|budget:N
+  streamIdleTimeoutMs: 5000,         // 每轮空闲看门狗
 }));
 
 // 工具两种接法：JS 闭包（loop 直接调用）……
@@ -84,6 +92,25 @@ const tick = setInterval(() => {
     if (ev.type === "agent_end") { clearInterval(tick); console.log("\n[done]"); }
   }
 }, 50);
+
+// —— M3：工具审批门 ——
+// manual 工具在执行前暂停；宿主 approveToolCall(id, allow) 决定。
+// deny 把 denied_by_host failure 返回给 LLM（模型可据此调整），
+// 不是静默失败。与 pump 正交（先审批，放行后进 pump 等待）。
+agent.registerToolWithOptions("rmFile", "delete a file",
+  JSON.stringify({ type: "object" }),
+  async (argsJson) => JSON.stringify({ text: "deleted" }),
+  JSON.stringify({ approval: "manual" }));
+// 事件循环里：
+//   if (ev.type === "tool_execution_start" && ev.tool_name === "rmFile") {
+//     agent.approveToolCall(ev.tool_use_id, confirm("allow?"));
+//   }
+
+// —— M2：成本快照 ——
+// token 累计（不乘价格——宿主拿原始 token 自己算钱）；clearSession 不重置
+// {"totalInputTokens":…,"totalOutputTokens":…,"totalCacheReadTokens":…,
+//  "totalCacheWriteTokens":…,"totalReasoningTokens":…,"providerCalls":…}
+const cost = JSON.parse(agent.costSnapshot());
 
 // 会话是门面持有的 JSON，由宿主负责持久化：
 const saved = agent.exportSession();          // {"v":1,"history":[{role,text},…]}
