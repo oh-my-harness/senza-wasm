@@ -23,7 +23,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <link rel="icon" href="data:," />
 <title>Agent Vale · web</title>
 <style>
@@ -108,6 +108,7 @@
     #console { width: calc(100vw - 24px); left: 12px; bottom: 12px;
       max-height: 42vh; }
     #hud span:last-child { display: none; } /* "Enter 聊天" 提示无意义 */
+    #chat { font-size: 16px; height: auto; } /* 防 iOS 聚焦放大 */
     canvas { border-radius: 0; }
   }
 </style>

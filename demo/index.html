@@ -45,6 +45,11 @@
     text-transform: uppercase; margin: 8px 0 18px; }
   #cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 380px));
     gap: 20px; width: 100%; max-width: 820px; }
+  @media (max-width: 360px) {
+    #cards { grid-template-columns: 1fr; } /* minmax(300px) 在窄屏溢出 4px */
+    body { padding: 32px 14px; }
+    a.card { padding: 18px 16px; }
+  }
   a.card { display: block; text-decoration: none; color: inherit;
     background: linear-gradient(160deg, #161a23, #11141c);
     border: 1px solid #262b36; border-radius: 16px; padding: 22px 24px;

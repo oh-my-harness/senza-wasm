@@ -11,7 +11,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <link rel="icon" href="data:," />
 <title>senza-wasm · deck</title>
 <style>
@@ -91,10 +91,11 @@
     #hud { top: 10px; right: 12px; padding: 6px 12px; font-size: 12px; }
     #toolbar { bottom: 58px; right: 12px; }
     #toolbar button { padding: 7px 12px; font-size: 13px; }
+    #input { font-size: 16px; } /* 防 iOS 聚焦放大 */
     #hint { display: none; }
-    #ptoggle { display: flex; align-items: center; gap: 6px; font-size: 13px;
+    #ptoggle { display: none; align-items: center; gap: 6px; font-size: 13px;
       color: #b8c0cc; cursor: pointer; user-select: none; }
-    body.preview #ptoggle { position: fixed; bottom: 12px; left: 50%;
+    body.preview #ptoggle { display: flex; position: fixed; bottom: 12px; left: 50%;
       transform: translateX(-50%); z-index: 40;
       background: rgba(13,17,26,.72); backdrop-filter: blur(14px);
       border: 1px solid rgba(255,255,255,.09); border-radius: 999px;
@@ -105,7 +106,7 @@
 <body>
 
 <div id="left">
-  <h1><a href="index.html">←</a> senza-wasm <small>· deck</small><span id="ptoggle">🖼 预览</span></h1>
+  <h1><a href="index.html">←</a> senza-wasm <small>· deck</small></h1>
   <div id="settings">
     <details>
       <label>预设（LLM 端点）</label>
@@ -131,6 +132,8 @@
     <button id="send" type="submit">发送</button>
   </form>
 </div>
+
+<div id="ptoggle">🖼 预览</div>
 
 <div id="right"><div id="stage"><iframe id="frame" title="deck preview"></iframe></div></div>
 <div id="hud"><span id="busy"></span><span id="pages">0 页</span><span id="tokens">0 tok</span></div>
