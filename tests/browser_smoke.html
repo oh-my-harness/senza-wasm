@@ -1,0 +1,136 @@
+<!doctype html>
+<!--
+  Browser smoke page (M1 plan Task 6) — MANUAL GATE, not CI.
+
+  Verifies the web-target build loads and runs in a real browser (the
+  nodejs target exercises the same wasm logic but different JS glue).
+  Uses `--target web` (init + fetch): the bundler target's
+  `import * as wasm from "./x.wasm"` requires a bundler — browsers
+  don't implement wasm ESM integration natively.
+
+  Run:
+    wasm-pack build --target web --out-dir pkg-web
+    python3 -m http.server 8931    # from repo root
+    open http://localhost:8931/tests/browser_smoke.html
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>senza-wasm browser smoke</title>
+<style>
+  body { font: 13px/1.5 ui-monospace, monospace; margin: 2rem; background: #111; color: #ddd; }
+  #log { white-space: pre-wrap; border: 1px solid #333; padding: 1rem; max-height: 70vh; overflow: auto; }
+  .pass { color: #7c7; } .fail { color: #c77; font-weight: bold; }
+  button { font: inherit; margin-right: 1rem; }
+</style>
+</head>
+<body>
+<h2>senza-wasm browser smoke</h2>
+<p>
+  <button id="run">run smoke</button>
+  <span id="status">idle</span>
+</p>
+<div id="log"></div>
+
+<script type="module">
+const log = (msg, cls = "") => {
+  const el = document.getElementById("log");
+  const line = document.createElement("div");
+  if (cls) line.className = cls;
+  line.textContent = msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+};
+const setStatus = (s, cls) => {
+  const el = document.getElementById("status");
+  el.textContent = s;
+  el.className = cls;
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function drain(agent, { until = () => false, timeoutMs = 10000 } = {}) {
+  const events = [];
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await sleep(25);
+    for (const line of agent.poll()) {
+      const ev = JSON.parse(line);
+      events.push(ev);
+      log(`  ${JSON.stringify(ev)}`);
+      if (until(ev)) return events;
+    }
+  }
+  throw new Error("drain timeout");
+}
+
+async function main() {
+  const wasmInit = await import("../pkg-web/senza_wasm.js");
+  await wasmInit.default(); // fetch + instantiate senza_wasm_bg.wasm
+  const { EmbeddedAgent, version } = wasmInit;
+  log(`senza-wasm v${version()} loaded`);
+
+  // 1. mock text turn
+  {
+    const agent = new EmbeddedAgent(JSON.stringify({
+      provider: "mock", model: "mock-model",
+      mockScript: [{ kind: "text", text: "hello from mock" }],
+    }));
+    agent.prompt("hi");
+    const evs = await drain(agent, { until: (e) => e.type === "agent_end" });
+    const ok = evs.some((e) => e.type === "text_delta") && evs.some((e) => e.type === "agent_end");
+    log(ok ? "TEXT TURN PASS" : "TEXT TURN FAIL", ok ? "pass" : "fail");
+    if (!ok) throw new Error("text turn");
+  }
+
+  // 2. closure tool, two turns
+  {
+    const agent = new EmbeddedAgent(JSON.stringify({
+      provider: "mock", model: "mock-model",
+      mockScript: [
+        { kind: "tool_use", toolUseId: "t1", name: "echo", args: "{}" },
+        { kind: "text", text: "done" },
+      ],
+    }));
+    agent.registerTool("echo", "returns ok", JSON.stringify({ type: "object" }),
+      async () => JSON.stringify({ text: "ok" }));
+    agent.prompt("use the tool");
+    const evs = await drain(agent, { until: (e) => e.type === "agent_end" });
+    const ok = evs.some((e) => e.type === "tool_execution_start")
+      && evs.some((e) => e.type === "tool_execution_end")
+      && evs.some((e) => e.type === "agent_end");
+    log(ok ? "CLOSURE TOOL PASS" : "CLOSURE TOOL FAIL", ok ? "pass" : "fail");
+    if (!ok) throw new Error("closure tool");
+  }
+
+  // 3. session roundtrip
+  {
+    const agent = new EmbeddedAgent(JSON.stringify({
+      provider: "mock", model: "mock-model",
+      mockScript: [{ kind: "text", text: "first" }],
+    }));
+    agent.prompt("hello");
+    await drain(agent, { until: (e) => e.type === "agent_end" });
+    const session = agent.exportSession();
+    const agent2 = new EmbeddedAgent(JSON.stringify({ provider: "mock", model: "mock-model" }));
+    agent2.importSession(session);
+    const ok = agent2.exportSession() === session;
+    log(ok ? "SESSION ROUNDTRIP PASS" : "SESSION ROUNDTRIP FAIL", ok ? "pass" : "fail");
+    if (!ok) throw new Error("session roundtrip");
+  }
+
+  log("BROWSER SMOKE PASS", "pass");
+  setStatus("PASS", "pass");
+}
+
+document.getElementById("run").addEventListener("click", () => {
+  setStatus("running…");
+  document.getElementById("log").textContent = "";
+  main().catch((e) => {
+    log(`FAIL: ${e && e.message ? e.message : e}`, "fail");
+    setStatus("FAIL", "fail");
+  });
+});
+</script>
+</body>
+</html>

@@ -28,3 +28,4 @@ jobs:
       - run: cargo install wasm-pack --locked
       - run: wasm-pack build --target nodejs --out-dir pkg-node
       - run: node tests/node_smoke.mjs
+      - run: node tests/node_multi_turn.mjs
