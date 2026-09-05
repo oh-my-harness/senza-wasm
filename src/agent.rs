@@ -532,4 +532,37 @@ mod tests {
             "got: {err:?}"
         );
     }
+
+    /// Regression pin for the v0.1 injection bug (M1 spec §1): the kernel
+    /// `agent_loop` never reads `config.run.initial_messages`, so the
+    /// facade must inject history + [user_msg] into `ctx.messages`. This
+    /// asserts the SECOND provider request carries a longer message list
+    /// than the first — true only when history continuation works.
+    #[wasm_bindgen_test]
+    async fn second_request_carries_first_turn_history() {
+        use llm_harness_loop::test_utils::{MockLlmClient, MockResponse};
+        let client = Arc::new(MockLlmClient::new(vec![
+            MockResponse::text("a"),
+            MockResponse::text("b"),
+        ]));
+        let provider: Arc<dyn llm_adapter::provider::Provider> = client.clone();
+        let agent = EmbeddedAgent::new_with_client(
+            provider,
+            parse_opts(r#"{"provider":"mock","model":"m"}"#.into()).unwrap(),
+        );
+        agent.prompt("one".into());
+        drain_to_end(&agent).await;
+        agent.prompt("two".into());
+        drain_to_end(&agent).await;
+
+        let reqs = client.captured_requests.lock();
+        assert_eq!(reqs.len(), 2, "two chat_stream calls");
+        let count = |r: &llm_adapter::types::ChatRequest| r.messages().len();
+        assert!(
+            count(&reqs[1]) > count(&reqs[0]),
+            "second request must carry first-turn history ({} vs {})",
+            count(&reqs[0]),
+            count(&reqs[1]),
+        );
+    }
 }
