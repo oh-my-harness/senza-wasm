@@ -300,7 +300,10 @@ fn default_provider() -> String {
     "openai".into()
 }
 fn default_stream_idle_timeout_ms() -> u64 {
-    5000
+    // wasm32 上这是唯一的流超时（reqwest wasm backend 无 timeout API）：
+    // 对齐 native read_timeout 的"事件间隔"语义，但取 30s——覆盖 reasoning
+    // 模型的首 token 延迟，同时不让浏览器用户干等太久。
+    30000
 }
 fn default_max_tokens() -> u32 {
     4096
@@ -995,6 +998,12 @@ mod tests {
             Some(ThinkingLevel::Budget(1024))
         ));
         assert_eq!(opts.stream_idle_timeout_ms, 9000);
+
+        // 默认 30s：wasm32 上唯一的流超时（reqwest wasm 无 timeout API），
+        // 对齐 native read_timeout 语义。曾经是 5s —— reasoning 模型首 token
+        // 延迟就能误杀。pin 住防止回退。
+        let dflt = parse_opts(r#"{"provider":"mock","model":"m"}"#.into()).unwrap();
+        assert_eq!(dflt.stream_idle_timeout_ms, 30000);
 
         // invalid thinkingLevel must be a parse error, not a silent default
         let err = parse_opts(r#"{"provider":"mock","model":"m","thinkingLevel":"bogus"}"#.into())

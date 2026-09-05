@@ -1,0 +1,542 @@
+<!doctype html>
+<!--
+  谁是卧底 · web — 多 agent 同场 demo。
+
+  本 demo 的核心展示：N 个 EmbeddedAgent 实例同场，各自独立 session。
+  「谁也不知道谁是卧底」是物理隔离（各 agent 只在自己的 history 里
+  看到自己的词），不是 prompt 承诺。发言/投票必须走 speak/vote 工具，
+  编排层（本文件）只采信工具结果 —— text 输出只是模型的思考旁白。
+
+  Run:
+    wasm-pack build --target web --out-dir pkg-web
+    python3 -m http.server 8931    # repo root
+    open http://localhost:8931/demo/undercover.html
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="data:," />
+<title>谁是卧底 · agent 圆桌</title>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; background: #0a0d14; color: #e8ebf0;
+    font: 14px/1.6 -apple-system, "PingFang SC", sans-serif; overflow: hidden; }
+
+  /* ---- 圆桌 ---- */
+  #table { position: fixed; inset: 0; display: flex; align-items: center;
+    justify-content: center; }
+  #ring { position: relative; width: min(88vmin, 640px); height: min(88vmin, 640px); }
+  .seat { position: absolute; width: 108px; margin: -70px 0 0 -54px;
+    text-align: center; transition: opacity .4s, filter .4s; }
+  .seat .avatar { width: 64px; height: 64px; margin: 0 auto; border-radius: 50%;
+    border: 2px solid #2a3040; background: #161a23; font-size: 30px;
+    line-height: 60px; transition: border-color .25s, box-shadow .25s,
+    transform .25s; }
+  .seat .name { font-size: 13px; margin-top: 6px; color: #b8c0cc; }
+  .seat .bub { margin-top: 6px; min-height: 30px; font-size: 12px; color: #9aa3b0;
+    line-height: 1.45; }
+  .seat.turn .avatar { border-color: #f5c76b; box-shadow: 0 0 0 5px rgba(245,199,107,.18);
+    transform: scale(1.08); }
+  .seat.turn .name { color: #f5c76b; }
+  .seat.dead { opacity: .28; filter: grayscale(1); }
+  .seat.dead .avatar { text-decoration: line-through; }
+  .seat.voted .avatar { border-color: #e58c8c; }
+  .seat .word { font-size: 11px; color: #7fa88a; margin-top: 2px; }
+
+  /* 中央信息区 */
+  #center { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    width: 46%; text-align: center; pointer-events: none; }
+  #center .phase { font-size: 15px; color: #f5c76b; letter-spacing: .12em; }
+  #center .round { font-size: 12px; color: #7d8590; margin-top: 4px; }
+  #center .yourword { margin-top: 18px; font-size: 13px; color: #9aa3b0; }
+  #center .yourword b { display: block; font-size: 26px; color: #e8ebf0;
+    margin-top: 6px; letter-spacing: .3em; }
+  #center .yourword small { display: block; font-size: 11px; color: #7d8590;
+    margin-top: 8px; }
+
+  /* 投票按钮 */
+  #votebar { position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%);
+    display: none; gap: 10px; }
+  #votebar.show { display: flex; }
+  #votebar button { background: #2a3040; border: 1px solid #3a4152; color: #e8ebf0;
+    border-radius: 10px; padding: 10px 18px; font: inherit; cursor: pointer; }
+  #votebar button:hover { border-color: #e58c8c; background: #33222a; }
+
+  /* 玩家发言输入 */
+  #speakbar { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    display: none; width: min(560px, calc(100vw - 32px)); }
+  #speakbar.show { display: flex; gap: 8px; }
+  #speakbar input { flex: 1; background: rgba(13,17,26,.85);
+    backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,.14);
+    border-radius: 10px; color: #e8ebf0; font: inherit; padding: 10px 14px;
+    outline: none; }
+  #speakbar input:focus { border-color: rgba(245,199,107,.6); }
+  #speakbar button { background: #2d6cdf; border: 0; border-radius: 10px;
+    color: #fff; padding: 0 18px; cursor: pointer; font: inherit; }
+
+  /* 事件日志（右侧抽屉感） */
+  #log { position: fixed; top: 64px; right: 16px; width: 300px;
+    max-height: calc(100vh - 200px); overflow-y: auto;
+    scrollbar-width: thin; pointer-events: auto;
+    background: rgba(13,17,26,0.72); backdrop-filter: blur(14px);
+    border: 1px solid rgba(255,255,255,0.09); border-radius: 14px;
+    padding: 10px 12px; font-size: 12px; display: none; }
+  #log.show { display: block; }
+  .line { margin: 3px 0; animation: fadein .25s ease-out; }
+  .line.sys { color: #7d8590; }
+  .line.vote { color: #e58c8c; }
+  .line.err { color: #e58c8c; }
+  .line.tool { color: #7fa88a; }
+  @keyframes fadein { from { opacity: 0; transform: translateY(4px); } }
+
+  /* ---- 顶栏 / 设置（与 vale 一致的设计语言） ---- */
+  #hud { position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 22px; align-items: center;
+    background: rgba(13,17,26,0.72); backdrop-filter: blur(14px);
+    border: 1px solid rgba(255,255,255,0.09); border-radius: 999px;
+    padding: 8px 20px; font-size: 13px; color: #b8c0cc; user-select: none; }
+  #hud b { color: #e8ebf0; font-weight: 600; }
+  #busy { width: 9px; height: 9px; border-radius: 50%; background: #4a5262;
+    transition: background .2s; }
+  #busy.on { background: #f5c76b; animation: pulse 1.1s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 5px rgba(245,199,107,0.25); } }
+  #start { background: #2d6cdf; border: 0; border-radius: 8px; color: #fff;
+    padding: 5px 16px; cursor: pointer; font: inherit; font-size: 13px; }
+  #start:disabled { background: #3a4152; cursor: not-allowed; }
+  #gear { position: fixed; top: 16px; right: 16px; width: 38px; height: 38px;
+    border-radius: 50%; border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(13,17,26,0.72); backdrop-filter: blur(14px);
+    color: #b8c0cc; cursor: pointer; font-size: 17px; line-height: 36px;
+    text-align: center; user-select: none; }
+  #gear:hover { color: #fff; }
+  #settings { position: fixed; top: 64px; right: 16px; width: 320px;
+    background: rgba(13,17,26,0.86); backdrop-filter: blur(14px);
+    border: 1px solid rgba(255,255,255,0.09); border-radius: 14px;
+    padding: 14px 16px 16px; display: none; z-index: 5; }
+  #settings.open { display: block; }
+  #settings label { display: block; font-size: 12px; color: #9aa3b0; margin: 10px 0 3px; }
+  #settings select, #settings input { width: 100%; font: inherit; font-size: 13px;
+    background: #0a0d14; color: #e8ebf0; border: 1px solid #323949;
+    border-radius: 6px; padding: 6px 8px; }
+  #settings p.note { font-size: 11px; color: #7d8590; margin: 10px 0 0; line-height: 1.5; }
+  a.back { position: fixed; top: 16px; right: 62px; width: 38px; height: 38px;
+    border-radius: 50%; border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(13,17,26,0.72); backdrop-filter: blur(14px);
+    color: #b8c0cc; text-decoration: none; font-size: 15px; line-height: 36px;
+    text-align: center; }
+</style>
+</head>
+<body>
+<div id="table"><div id="ring"><div id="center"></div></div></div>
+
+<div id="votebar"></div>
+<form id="speakbar"><input id="speak-input" placeholder="用一句话描述你的词（不能说出词本身）…" /><button type="submit">发言</button></form>
+
+<div id="hud">
+  <span id="busy"></span>
+  <span id="phase-label">未开局</span>
+  <span>烧了 <b id="tokens">0</b> tokens</span>
+  <button id="start">开一局</button>
+</div>
+<a class="back" href="index.html" title="demos">←</a>
+<div id="gear" title="设置">⚙</div>
+<div id="settings">
+  <label>预设（provider / 端点）</label>
+  <select id="preset">
+    <option value="https://api.deepseek.com/v1" selected>DeepSeek（默认，便宜好用）</option>
+    <option value="https://api.openai.com/v1">OpenAI 官方</option>
+    <option value="https://api.anthropic.com">Anthropic 官方（Claude）</option>
+    <option value="http://localhost:11434/v1">Ollama 本地</option>
+    <option value="">其他 OpenAI 兼容端点…</option>
+  </select>
+  <label>API base URL</label>
+  <input id="baseurl" placeholder="https://api.deepseek.com/v1" />
+  <label>API key（存你的浏览器 localStorage，不经任何服务器）</label>
+  <input id="apikey" type="password" placeholder="sk-…" />
+  <label>model</label>
+  <input id="model" value="deepseek-v4-flash" />
+  <p class="note">三个 agent 各自独立 session 同场对局；key 存你浏览器的
+  localStorage，全 demo 共用。</p>
+</div>
+<div id="log"></div>
+
+<script type="module">
+import init, { EmbeddedAgent } from "../pkg-web/senza_wasm.js";
+import { bindSettings, providerOpts } from "./common.js";
+import {
+  WORD_PAIRS, makePlayer, dealWords, tallyVotes, checkGameOver,
+  newRoundState, currentSpeaker, recordSpeech, recordVote,
+} from "./undercover.js";
+
+const $ = (id) => document.getElementById(id);
+
+await init();
+
+// ======================= 席位与编排状态 =======================
+// 4 人局：3 agent（🦊🦉🦝）+ 你（🐹）。seat 0 固定是你。
+const HUMAN = 0;
+const AVATARS = ["🐹", "🦊", "🦉", "🦝"];
+const NAMES = ["你", "狐狸", "猫头鹰", "浣熊"];
+const AGENT_PERSONA = [
+  null, // seat 0 = 人类
+  "你语气机敏、爱抢话，分析时喜欢点出别人的措辞漏洞。",
+  "你语气沉稳、慢条斯理，发言喜欢从整体布局推理。",
+  "你语气大大咧咧、爱开玩笑，偶尔故意装傻。",
+];
+
+let players = [];       // makePlayer 数组（undercover.js 契约）
+let agents = {};        // seat → EmbeddedAgent（独立 session = 物理信息隔离）
+let st = null;          // 回合状态机（undercover.js 契约）
+let gameWord = null;    // { common, undercover }
+let gameOver = false;
+let busyCount = 0;      // 在途 agent 计数（hud 状态灯）
+
+// ======================= 渲染 =======================
+function buildSeats() {
+  const ring = $("ring");
+  for (let i = 0; i < 4; i++) {
+    const angle = -Math.PI / 2 + (i * Math.PI) / 2;
+    const R = 42; // 百分比半径
+    const seat = document.createElement("div");
+    seat.className = "seat";
+    seat.id = "seat" + i;
+    seat.style.left = 50 + R * Math.cos(angle) + "%";
+    seat.style.top = 50 + R * Math.sin(angle) + "%";
+    seat.innerHTML = `<div class="avatar">${AVATARS[i]}</div>
+      <div class="name">${NAMES[i]}</div><div class="bub"></div>
+      <div class="word"></div>`;
+    ring.appendChild(seat);
+  }
+}
+buildSeats();
+
+const seatEl = (s) => $("seat" + s);
+const setBubble = (s, text) => { seatEl(s).querySelector(".bub").textContent = text; };
+
+function logLine(cls, text) {
+  const div = document.createElement("div");
+  div.className = "line " + cls;
+  div.textContent = text;
+  $("log").appendChild(div);
+  $("log").classList.add("show");
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function setPhaseLabel(text) { $("phase-label").textContent = text; }
+
+function setCenter(html) { $("center").innerHTML = html; }
+
+function markTurn(s) {
+  for (let i = 0; i < 4; i++) seatEl(i).classList.toggle("turn", i === s);
+}
+
+function refreshDead() {
+  for (const p of players) seatEl(p.seat).classList.toggle("dead", !p.alive);
+}
+
+function updateTokens() {
+  let total = 0;
+  for (const a of Object.values(agents)) {
+    const c = JSON.parse(a.costSnapshot());
+    total += (c.totalInputTokens ?? 0) + (c.totalOutputTokens ?? 0)
+      + (c.totalCacheWriteTokens ?? 0) + (c.totalReasoningTokens ?? 0);
+  }
+  $("tokens").textContent = total;
+}
+
+// ======================= Agent 构造（信息隔离的关键） =======================
+function makeGameAgent(seat) {
+  const p = players[seat];
+  const a = new EmbeddedAgent(JSON.stringify(providerOpts({
+    streamIdleTimeoutMs: 30000,
+    systemPrompt: `你在玩「谁是卧底」。你的代号是「${p.name}」。
+你的词是「${p.word}」。${AGENT_PERSONA[seat] ?? ""}
+
+规则：
+- 每轮用一句中文描述你的词：可以描述特征、用途、联想，但不能直接说出词本身。
+- 你的目标是让大家觉得你是平民；如果你发现别人的描述和你的词对不上，
+  投票时把票投给最可疑的人。
+- 轮到你发言时必须调用 speak 工具，你的描述放在 statement 参数里。
+- 投票环节必须调用 vote 工具，target 填玩家代号。
+- 语气自然，像人在玩游戏，不要输出分析报告。`,
+  })));
+
+  a.registerTool("speak", "轮到你发言：提交你的一句话描述", JSON.stringify(
+    { type: "object", properties: { statement: { type: "string" } }, required: ["statement"] }),
+    (argsJson) => JSON.stringify({ text: "发言已记录" }));
+
+  a.registerTool("vote", "投票环节：投出你认为的卧底", JSON.stringify(
+    { type: "object", properties: { target: { type: "string" } }, required: ["target"] }),
+    (argsJson) => JSON.stringify({ text: "投票已记录" }));
+
+  return a;
+}
+
+// 事件泵：每个 agent 一份。工具结果经 tool_execution_end 捕获。
+function pumpAgent(seat, onTool, onDone) {
+  const a = agents[seat];
+  const pending = new Map();
+  let active = true;
+  busyCount++; $("busy").classList.add("on");
+  (async () => {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 40));
+      const lines = a.poll();
+      for (const line of lines) {
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.type === "agent_start") active = true;
+        // 参数在 start 事件上；end 只有 tool_use_id —— 按 id 配对
+        if (ev.type === "tool_execution_start")
+          pending.set(ev.tool_use_id, { name: ev.tool_name, args: ev.args ?? "" });
+        if (ev.type === "tool_execution_end" && ev.ok) {
+          const info = pending.get(ev.tool_use_id);
+          pending.delete(ev.tool_use_id);
+          if (info) onTool(info.name, info.args);
+        }
+        if (ev.type === "error")
+          logLine("err", `${NAMES[seat]} 出错：${ev.error_type ?? ""} ${ev.message ?? ""}`);
+        if (ev.type === "agent_end") active = false;
+      }
+      if (!lines.length && !active) break;
+    }
+  })().finally(() => {
+    busyCount--; if (!busyCount) $("busy").classList.remove("on");
+    updateTokens();
+    onDone?.();
+  });
+}
+
+// ======================= 流程编排 =======================
+// prompt 措辞：把场上已发生的发言作为上下文喂给当前发言者（各 agent 只见
+// 自己 session 里的内容 —— 词的隔离靠的就是这一点）。
+function transcriptText() {
+  const parts = [];
+  for (const [seat, text] of Object.entries(st.speechs)) {
+    parts.push(`${NAMES[seat]}：${text}`);
+  }
+  const votesText = Object.entries(st.votes)
+    .map(([from, to]) => `${NAMES[from]}→${NAMES[to]}`).join("，");
+  if (votesText) parts.push(`（上轮投票：${votesText}）`);
+  return parts.join("\n");
+}
+
+
+// 本轮已 prompt 过的座位（agent 不调工具时的防重入标记）
+const spokeThisTurn = new Set();
+async function nextSpeakerStep() {
+  if (gameOver) return;
+  const seat = currentSpeaker(st);
+  if (seat === null) { enterVoting(); return; }
+  markTurn(seat);
+  setPhaseLabel(`第 ${st.round} 轮 · ${NAMES[seat]} 发言中…`);
+
+  if (players[seat].kind === "human") {
+    setCenter(`<div class="phase">轮到你发言</div>
+      <div class="round">第 ${st.round} 轮</div>
+      <div class="yourword">你的词<small>${players[seat].word}（别直接说出来）</small></div>`);
+    $("speakbar").classList.add("show");
+    $("speak-input").focus();
+    return; // 等玩家提交
+  }
+
+  // 防重入：agent 没调 speak 工具（说了纯文本）时，跳过该座位而不是无限重试
+  if (spokeThisTurn.has(seat)) {
+    logLine("err", `${NAMES[seat]} 没有调用 speak 工具，跳过`);
+    recordSpeech(st, seat, "（沉默）");
+    setBubble(seat, "（沉默）");
+    nextSpeakerStep();
+    return;
+  }
+  spokeThisTurn.add(seat);
+
+  const ctx = transcriptText();
+  const prompt = st.round === 1 && !ctx
+    ? "游戏开始，你是第一个发言的。调用 speak 工具，用一句话描述你的词。"
+    : `目前场上的发言：\n${ctx}\n\n轮到你了。调用 speak 工具，用一句话描述你的词。`;
+  agents[seat].prompt(prompt);
+
+  pumpAgent(seat, (name, args) => {
+    if (name === "speak") {
+      // args 是工具调用参数 JSON —— 真正的发言内容
+      try {
+        const statement = JSON.parse(args).statement;
+        spokeThisTurn.delete(seat);
+        recordSpeech(st, seat, statement);
+        setBubble(seat, statement);
+        logLine("sys", `${NAMES[seat]}：${statement}`);
+      } catch (e) { logLine("err", `${NAMES[seat]} 发言解析失败: ${e}`); }
+    }
+  }, () => nextSpeakerStep());
+}
+
+$("speakbar").onsubmit = (e) => {
+  e.preventDefault();
+  const text = $("speak-input").value.trim();
+  if (!text) return;
+  $("speak-input").value = "";
+  $("speakbar").classList.remove("show");
+  const seat = currentSpeaker(st);
+  recordSpeech(st, seat, text);
+  setBubble(seat, text);
+  logLine("sys", `你：${text}`);
+  nextSpeakerStep();
+};
+
+function enterVoting() {
+  setPhaseLabel(`第 ${st.round} 轮 · 投票`);
+  markTurn(-1);
+  const alive = players.filter((p) => p.alive);
+  setCenter(`<div class="phase">投票</div>
+    <div class="round">选一个人出局（平票无人出局）</div>`);
+
+  // 人类先投：票栏
+  const bar = $("votebar");
+  bar.innerHTML = "";
+  for (const p of alive) {
+    if (p.seat === HUMAN) continue;
+    const b = document.createElement("button");
+    b.textContent = `${AVATARS[p.seat]} ${p.name}`;
+    b.onclick = () => castVote(HUMAN, p.seat);
+    bar.appendChild(b);
+  }
+  bar.classList.add("show");
+
+  // agent 并行投票
+  for (const p of alive) {
+    if (p.kind !== "agent") continue;
+    const seat = p.seat;
+    const others = alive.filter((x) => x.seat !== seat)
+      .map((x) => x.name).join("、");
+    agents[seat].prompt(`发言结束。场上发言：\n${transcriptText()}\n\n` +
+      `现在投票。可投：${others}。调用 vote 工具，target 填玩家代号。`);
+    pumpAgent(seat, (name, args) => {
+      if (name === "vote") {
+        try {
+          const target = JSON.parse(args).target;
+          const t = alive.find((x) => x.name === target || String(x.seat) === target);
+          if (t) castVote(seat, t.seat);
+          else logLine("err", `${NAMES[seat]} 投了无效目标「${target}」，弃票`);
+        } catch (e) { logLine("err", `${NAMES[seat]} 投票解析失败: ${e}`); }
+      }
+    });
+  }
+}
+
+const voted = new Set();
+function castVote(from, to) {
+  if (gameOver || voted.has(from) || from === to) return;
+  if (from === HUMAN) $("votebar").classList.remove("show");
+  recordVote(st, from, to);
+  voted.add(from);
+  seatEl(to).classList.add("voted");
+  setTimeout(() => seatEl(to).classList.remove("voted"), 800);
+  logLine("vote", `${NAMES[from]} → ${NAMES[to]}`);
+  if (Object.keys(st.votes).length >= st.speakTotal) resolveVotes();
+}
+
+function resolveVotes() {
+  const r = tallyVotes(st.votes);
+  const counts = [...r.counts.entries()].map(([s, n]) => `${NAMES[s]} ${n}票`).join("，");
+  logLine("sys", `开票：${counts}${r.tie ? "（平票）" : ""}`);
+
+  if (r.eliminated !== null) {
+    const out = players[r.eliminated];
+    out.alive = false;
+    refreshDead();
+    const role = out.isUndercover ? "卧底！" : "平民";
+    logLine("sys", `${out.name} 出局，身份是${role}`);
+    setBubble(r.eliminated, `（出局·${role}）`);
+  } else {
+    logLine("sys", "平票，无人出局，进入下一轮");
+  }
+
+  const alivePlayers = players.filter((p) => p.alive);
+  const uc = alivePlayers.find((p) => p.isUndercover);
+  const over = checkGameOver(alivePlayers.length, !!uc);
+  if (over) return endGame(over);
+
+  // 下一轮：从出局者的下一位存活者起（简化：固定从 seat 顺序找第一个存活）
+  st = newRoundState(players, alivePlayers[0].seat);
+  st.phase = "speaking";
+  voted.clear();
+  for (const p of players) setBubble(p.seat, ""); // 清空气泡，新一轮
+  setTimeout(() => nextSpeakerStep(), 900);
+}
+
+function endGame(result) {
+  gameOver = true;
+  const ucSeat = players.findIndex((p) => p.isUndercover);
+  const ucName = NAMES[ucSeat];
+  const win = result.winner === "civilians";
+  setPhaseLabel(win ? "平民胜利" : "卧底胜利");
+  const youAreUC = players[HUMAN].isUndercover;
+  const youWin = youAreUC ? !win : win;
+  setCenter(`<div class="phase">${win ? "🎉 平民胜利" : "🕵️ 卧底胜利"}</div>
+    <div class="round">卧底是 ${AVATARS[ucSeat]} ${ucName}（词：${gameWord.undercover}）
+    · 平民词：${gameWord.common}</div>
+    <div class="yourword" style="margin-top:14px">${youWin ? "你赢了 🎊" : "你输了 😢"}
+    <small>点击上方「开一局」再来</small></div>`);
+  logLine("sys", `游戏结束：${win ? "平民" : "卧底"}胜利（${result.reason}）`);
+  seatEl(ucSeat).classList.add("turn");
+  updateTokens();
+}
+
+// ======================= 开局 =======================
+$("start").onclick = () => {
+  // 清场
+  for (let i = 0; i < 4; i++) {
+    const el = seatEl(i);
+    el.classList.remove("dead", "turn");
+    el.querySelector(".bub").textContent = "";
+    el.querySelector(".word").textContent = "";
+  }
+  $("log").innerHTML = "";
+  gameOver = false;
+  voted.clear();
+
+  try {
+    players = [0, 1, 2, 3].map((s) => makePlayer(s, NAMES[s], s === HUMAN ? "human" : "agent"));
+    const pair = WORD_PAIRS[Math.floor(Math.random() * WORD_PAIRS.length)];
+    const ucSeat = Math.floor(Math.random() * 4); // 卧底可以是任何人——包括你
+    gameWord = dealWords(players, pair, ucSeat);
+
+    // 各 agent 独立实例 + 独立 session —— 词只进各自的 system prompt
+    agents = {};
+    for (const p of players) {
+      if (p.kind === "agent") agents[p.seat] = makeGameAgent(p.seat);
+    }
+  } catch (err) {
+    logLine("err", String(err.message ?? err));
+    return;
+  }
+
+  st = newRoundState(players, 0);
+  st.phase = "speaking";
+  $("start").disabled = true;
+  setTimeout(() => { $("start").disabled = false; }, 1500);
+
+  // 你的词亮出来；agent 的词永远不显示
+  setCenter(`<div class="phase">你的词</div>
+    <div class="round">第 1 轮即将开始…</div>
+    <div class="yourword">${players[HUMAN].isUndercover ? "你是卧底 🕵️" : "你是平民"}
+    <b>${players[HUMAN].word}</b>
+    <small>${players[HUMAN].isUndercover ? "想办法描述得像平民，别被投出去" : "找出和你词不一样的人"}</small></div>`);
+  logLine("sys", `新的一局：4 人（3 agent + 你），1 名卧底`);
+
+  setTimeout(() => nextSpeakerStep(), 1800);
+};
+
+// 设置抽屉（配置全 demo 共享）
+$("gear").onclick = () => $("settings").classList.toggle("open");
+bindSettings({ preset: "preset", baseurl: "baseurl", apikey: "apikey", model: "model" },
+  () => { /* 换配置只影响下一局；当前局继续 */ });
+
+setPhaseLabel("未开局 · 点「开一局」");
+setCenter(`<div class="phase">谁是卧底</div>
+  <div class="round">3 个 agent + 你 · 每人一个词 · 卧底的词不一样</div>
+  <div class="yourword">谁的描述对不上？<small>配置一次 API（⚙），点「开一局」开始</small></div>`);
+</script>
+</body>
+</html>

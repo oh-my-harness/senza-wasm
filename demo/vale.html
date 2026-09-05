@@ -521,7 +521,6 @@ function logLine(cls, text) {
 
 function makeAgent() {
   const a = new EmbeddedAgent(JSON.stringify(providerOpts({
-    streamIdleTimeoutMs: 30000,  // reasoning 模型首 token 可能 >5s，默认 5s 会误杀
     systemPrompt: `你是"建筑师"，一个住在草地游戏里的顽皮精灵。
 玩家在 40x23 的网格上走动（坐标从 1 开始：x=1..40 从左到右，y=1..23 从上到下）。
 你通过工具实时改造世界：plant_tree（种树）、place_rock（放石头，tiles 数组可一次放多块）、spawn_creature、
