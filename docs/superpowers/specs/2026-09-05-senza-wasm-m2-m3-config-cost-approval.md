@@ -1,7 +1,7 @@
 # senza-wasm M2+M3 设计：config 透传 + 成本快照 + 工具审批门
 
 日期：2026-09-05
-状态：待批准
+状态：已实施（commit 39240d9 / 45ef51e / 193d460；npm 包项留独立 spec）
 前置：M1 已完成（`docs/superpowers/specs/2026-09-05-senza-wasm-session-core-design.md`）
 
 ## 1. 背景
