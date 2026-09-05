@@ -3,8 +3,8 @@
   senza-wasm browser demo — 一个页面里的本地 agent。
 
   单 HTML + 工具 + 审批门 + 成本快照，纯前端跑完整 agent loop。
-  默认 mock provider（不花 API 费）；填入真实 openai key 可切真模型
-  （key 只在浏览器内存里，刷新即失；生产应走网关代理）。
+  直连任意 OpenAI 兼容 API（官方 / DeepSeek / Moonshot / Ollama …）；
+  key 只在浏览器内存里，刷新即失；生产应走网关代理。
 
   Run:
     wasm-pack build --target web --out-dir pkg-web
@@ -15,6 +15,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="data:," />
 <title>senza-wasm · browser agent</title>
 <style>
   * { box-sizing: border-box; }
@@ -64,12 +65,7 @@
   <h1>senza-wasm <small>· browser agent</small></h1>
   <fieldset>
     <legend>provider</legend>
-    <label>模式</label>
-    <select id="mode">
-      <option value="mock" selected>mock（确定性剧本，不花钱）</option>
-      <option value="openai">openai（真实模型）</option>
-    </select>
-    <div id="openai-box" style="display:none">
+    <div>
       <label>预设（OpenAI 兼容端点）</label>
       <select id="preset">
         <option value="https://api.openai.com/v1" selected>OpenAI 官方</option>
@@ -91,14 +87,6 @@
         CORS（OpenAI/DeepSeek 等官方 API 允许；自建网关可能要配）。
       </p>
     </div>
-    <label>mock 剧本（mock 模式下循环播放）</label>
-    <textarea id="script">
-[
-  { "kind": "tool_use", "toolUseId": "d1", "name": "fetchTime", "args": "{}" },
-  { "kind": "tool_use", "toolUseId": "d2", "name": "writeNote", "args": "{\"text\":\"hello world\"}" },
-  { "kind": "text", "text": "已查询时间并保存笔记（被审批门拦过一次）。" }
-]
-    </textarea>
   </fieldset>
   <fieldset>
     <legend>会话</legend>
@@ -156,20 +144,17 @@ let agent = null;
 let currentAssistantBody = null;
 
 function makeAgent() {
-  const mock = $("mode").value === "mock";
-  const opts = mock
-    ? { provider: "mock", model: "mock-model", mockScript: JSON.parse($("script").value) }
-    : (() => {
-        if (!$("apikey").value.trim() && !$("baseurl").value.includes("localhost"))
-          throw new Error("请先填 API key（或切回 mock 模式）");
-        return {
-          provider: "openai",
-          apiKey: $("apikey").value.trim(),
-          baseUrl: $("baseurl").value.trim() || undefined,
-          model: $("model").value.trim() || "gpt-4o-mini",
-          systemPrompt: "你是一个简洁的中文助手。需要当前时间就调 fetchTime 工具；要保存内容必须调 writeNote 工具（会经用户审批）。",
-        };
-      })();
+  const opts = (() => {
+    if (!$("apikey").value.trim() && !$("baseurl").value.includes("localhost"))
+      throw new Error("请先填 API key（Ollama 本地端点可留空）");
+    return {
+      provider: "openai",
+      apiKey: $("apikey").value.trim(),
+      baseUrl: $("baseurl").value.trim() || undefined,
+      model: $("model").value.trim() || "gpt-4o-mini",
+      systemPrompt: "你是一个简洁的中文助手。需要当前时间就调 fetchTime 工具；要保存内容必须调 writeNote 工具（会经用户审批）。",
+    };
+  })();
   const a = new EmbeddedAgent(JSON.stringify(opts));
 
   // 工具 1：查时间 —— 自动执行
@@ -277,14 +262,13 @@ function updateCost() {
 }
 
 // ---------- wiring ----------
-$("mode").onchange = () => { $("openai-box").style.display = $("mode").value === "openai" ? "" : "none"; };
 $("preset").onchange = () => {
   const url = $("preset").value;
   if (url) $("baseurl").value = url;
   $("baseurl").focus();
 };
-// 切换 agent 配置（模式/端点/key/model 变更）后重建 agent
-for (const id of ["mode", "preset", "baseurl", "apikey", "model"])
+// 配置变更（端点/key/model）后重建 agent
+for (const id of ["preset", "baseurl", "apikey", "model"])
   $(id).addEventListener("change", () => { agent = null; });
 
 let lastSessionJson = null;
@@ -335,7 +319,7 @@ $("import").onclick = async () => {
 $("clear").onclick = () => { if (agent) { agent.clearSession(); addMsg("assistant", "system", "会话已清空（成本累计保留）。"); } };
 
 addMsg("assistant", "system",
-  '已就绪。默认 mock 剧本：模型会调 fetchTime（自动执行）、调 writeNote（弹审批）、然后收尾文字。\n试试输入任意内容，或切到 openai 模式接真模型。');
+  '已就绪。填好 API 端点和 key 即可对话；模型可调 fetchTime（自动执行）和 writeNote（弹审批、写 localStorage）。\n换端点/模型会保留聊天记录接着聊。');
 </script>
 </body>
 </html>
