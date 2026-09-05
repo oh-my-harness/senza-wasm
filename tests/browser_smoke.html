@@ -119,6 +119,65 @@ async function main() {
     if (!ok) throw new Error("session roundtrip");
   }
 
+
+  // 4. M2: costSnapshot accumulation
+  {
+    const agent = new EmbeddedAgent(JSON.stringify({
+      provider: "mock", model: "mock-model",
+      mockScript: [
+        { kind: "text", text: "a", usage: { inputTokens: 10, outputTokens: 5 } },
+        { kind: "text", text: "b", usage: { inputTokens: 7, outputTokens: 3 } },
+      ],
+    }));
+    agent.prompt("one");
+    await drain(agent, { until: (e) => e.type === "agent_end" });
+    agent.prompt("two");
+    await drain(agent, { until: (e) => e.type === "agent_end" });
+    const cost = JSON.parse(agent.costSnapshot());
+    const ok = cost.totalInputTokens === 17 && cost.providerCalls === 2;
+    log(ok ? "COST SNAPSHOT PASS" : "COST SNAPSHOT FAIL: " + JSON.stringify(cost), ok ? "pass" : "fail");
+    if (!ok) throw new Error("cost snapshot");
+  }
+
+  // 5. M3: approval gate (deny path — failure visible, loop continues)
+  {
+    const agent = new EmbeddedAgent(JSON.stringify({
+      provider: "mock", model: "mock-model",
+      mockScript: [
+        { kind: "tool_use", toolUseId: "a1", name: "danger", args: "{}" },
+        { kind: "text", text: "denied, done" },
+      ],
+    }));
+    agent.registerToolWithOptions("danger", "needs approval",
+      JSON.stringify({ type: "object" }),
+      async () => JSON.stringify({ text: "never runs" }),
+      JSON.stringify({ approval: "manual" }));
+    agent.prompt("go");
+    // Poll loop with the denial wired in: deny as soon as the gate parks.
+    const evs = [];
+    let denyEnd = null;
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      await sleep(25);
+      for (const line of agent.poll()) {
+        const e = JSON.parse(line);
+        evs.push(e);
+        log(`  ${JSON.stringify(e)}`);
+        if (e.type === "tool_execution_start" && e.tool_use_id === "a1") {
+          agent.approveToolCall(e.tool_use_id, false); // DENY
+        }
+        if (e.type === "tool_execution_end") denyEnd = e;
+        if (e.type === "agent_end") {
+          const endJson = JSON.stringify(denyEnd ?? {});
+          const ok = /denied_by_host|error/i.test(endJson);
+          log(ok ? "APPROVAL (deny) PASS" : "APPROVAL (deny) FAIL: " + endJson, ok ? "pass" : "fail");
+          if (!ok) throw new Error("approval deny");
+        }
+      }
+    }
+    if (!evs.some((x) => x.type === "agent_end")) throw new Error("approval deny: timeout");
+  }
+
   log("BROWSER SMOKE PASS", "pass");
   setStatus("PASS", "pass");
 }

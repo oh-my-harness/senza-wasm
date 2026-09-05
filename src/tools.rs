@@ -173,6 +173,9 @@ impl Tool for PendingTool {
         })
     }
 }
+// ToolFailure is 144 bytes on native targets (kernel type, its size is
+// the Tool::execute contract — not ours to shrink).
+#[allow(clippy::result_large_err)]
 fn parse_pump_result(call_id: &str, result_json: &str) -> Result<ToolResult, ToolFailure> {
     let value: serde_json::Value = serde_json::from_str(result_json).map_err(|e| {
         ToolFailure::new(
