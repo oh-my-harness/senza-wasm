@@ -63,7 +63,15 @@ impl Tool for JsTool {
             let ret = callback.call1(&JsValue::NULL, &args_js).map_err(|e| {
                 ToolFailure::new("execution_error", format!("JS callback failed: {e:?}"))
             })?;
-            let promise = js_sys::Promise::from(ret);
+            // Host callbacks may be sync (plain string/object return) or async
+            // (Promise). Promise::from on a non-thenable corrupts JsFuture's
+            // .then() call — the run task panics and `running` never resets.
+            // Normalize: wrap non-promises in Promise.resolve().
+            let promise = if ret.is_instance_of::<js_sys::Promise>() {
+                js_sys::Promise::from(ret)
+            } else {
+                js_sys::Promise::resolve(&ret)
+            };
             let out = JsFuture::from(promise).await.map_err(|e| {
                 ToolFailure::new("execution_error", format!("JS promise rejected: {e:?}"))
             })?;
@@ -308,6 +316,31 @@ mod tests {
         assert_eq!(
             tool.parameters_schema(),
             &serde_json::json!({"type":"object"})
+        );
+    }
+
+    /// Regression: a SYNC host callback (plain string return, no Promise)
+    /// used to corrupt JsFuture (`arg0.then is not a function`), killing the
+    /// run task with `running` never reset — the agent locked up forever.
+    /// Promise::resolve must normalize non-thenable returns.
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn js_tool_sync_callback_completes() {
+        let cb = js_sys::Function::new_no_args("return '{\"text\":\"sync ok\"}';");
+        let tool = JsTool::new(
+            "t".into(),
+            "d".into(),
+            serde_json::json!({"type":"object"}),
+            cb,
+        );
+        let ctx = make_ctx();
+        let fut = Tool::execute(&tool, serde_json::json!({}), &ctx);
+        let result = fut.await.unwrap();
+        assert_eq!(
+            result.model_content.first().and_then(|b| match b {
+                DataBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            }),
+            Some("sync ok")
         );
     }
 
