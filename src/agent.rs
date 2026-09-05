@@ -12,7 +12,7 @@ use futures::StreamExt;
 use parking_lot::Mutex;
 use wasm_bindgen::prelude::*;
 
-use llm_harness_loop::{agent_loop, DefaultConvertToLlm, FinalAnswerMode, LoopConfig};
+use llm_harness_loop::{DefaultConvertToLlm, FinalAnswerMode, LoopConfig, agent_loop};
 use llm_harness_types::{
     AgentContext, AgentEvent, RunContext, RunRequest, StreamOptions, ToolExecutionMode,
 };
@@ -59,6 +59,22 @@ pub struct EmbeddedAgent {
     deps: AgentDeps,
 }
 
+/// One preset in a mock conversation script (constructor JSON only;
+/// not part of the public API surface).
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum MockSpec {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        tool_use_id: String,
+        name: String,
+        args: String,
+    },
+    RateLimitError,
+}
+
 /// Options accepted by `createAgent` (JSON string).
 #[derive(serde::Deserialize)]
 struct AgentOpts {
@@ -78,6 +94,10 @@ struct AgentOpts {
     max_turns: u32,
     #[serde(default)]
     temperature: Option<f32>,
+    /// Mock conversation script (provider "mock" only). Consumed in
+    /// order; after exhaustion the mock falls back to plain EndTurn text.
+    #[serde(default, rename = "mockScript")]
+    mock_script: Option<Vec<MockSpec>>,
 }
 
 fn default_provider() -> String {
@@ -112,23 +132,42 @@ impl EmbeddedAgent {
     /// `{provider, apiKey, baseUrl?, model, systemPrompt?, maxTokens?, maxTurns?, temperature?}`.
     #[wasm_bindgen(constructor)]
     pub fn new(opts_json: String) -> Result<EmbeddedAgent, JsValue> {
-        let opts: AgentOpts = serde_json::from_str(&opts_json)
+        let mut opts: AgentOpts = serde_json::from_str(&opts_json)
             .map_err(|e| JsValue::from_str(&format!("invalid createAgent options: {e}")))?;
         match opts.provider.as_str() {
             "mock" => {
-                let client = Arc::new(llm_harness_loop::test_utils::MockLlmClient::new(vec![
-                    llm_harness_loop::test_utils::MockResponse::text("mock response"),
-                ]));
+                let responses = opts
+                    .mock_script
+                    .take()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|spec| match spec {
+                        MockSpec::Text { text } => {
+                            llm_harness_loop::test_utils::MockResponse::text(&text)
+                        }
+                        MockSpec::ToolUse {
+                            tool_use_id,
+                            name,
+                            args,
+                        } => llm_harness_loop::test_utils::MockResponse::tool_use(
+                            &tool_use_id,
+                            &name,
+                            &args,
+                        ),
+                        MockSpec::RateLimitError => {
+                            llm_harness_loop::test_utils::MockResponse::rate_limit_error()
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let client = Arc::new(llm_harness_loop::test_utils::MockLlmClient::new(responses));
                 Ok(Self::new_with_client(client, opts))
             }
             "openai" => {
-                let mut builder =
-                    llm_harness_loop::OpenAIProvider::builder(opts.api_key.clone());
+                let mut builder = llm_harness_loop::OpenAIProvider::builder(opts.api_key.clone());
                 if let Some(url) = &opts.base_url {
                     builder = builder.base_url(url.clone());
                 }
-                let client: Arc<dyn llm_adapter::provider::Provider> =
-                    Arc::new(builder.build());
+                let client: Arc<dyn llm_adapter::provider::Provider> = Arc::new(builder.build());
                 Ok(Self::new_with_client(client, opts))
             }
             other => Err(JsValue::from_str(&format!(
