@@ -129,13 +129,20 @@ agent.clearSession(): void          // history 清空；不中断进行中的 ru
 - mock 分支保留无 script 的默认行为（单条 "mock response" text），
   既有 node_smoke 不动
 
-### 3.4 call_id 语义复查（原 v0.3 未定项）
+### 3.4 call_id 语义复查（原 v0.3 未定项）——已结案
 
-当前 pump 寻址用 `tool_use_id`（LLM 分配），注册时生成 uuid 作为
-通道 key。要复查的：Python SDK 是否用独立 call_id。**判定标准**：
-事件 JSON 的 `type` 字段串与 Python SDK 一字不差是仓库铁律，
-寻址字段名同样以此为准。复查结论（对齐 / 保持 tool_use_id）写回
-本节，必要时同步事件字段。
+**复查结论：保持 `tool_use_id`，无需对齐。** 实证：Senza Python SDK
+（`Senza/src/shared/event_stream.rs:199`）事件寻址字段就是
+`tool_use_id`，两侧一字不差；Python SDK 没有 pump 模式（只有
+callback，`pytool.rs`），不存在独立 call_id 概念。
+
+附带修正（实施时发现）：v0.1 的 pump 通道 key 是门面生成的随机
+uuid，而 `resolveTool` 按 LLM 分配的 `tool_use_id` 寻址——两者
+永不相等，pump 模式在 wasm 上从未真正工作过。M1 重设计为
+`PendingTool` 内部 `HashMap<tool_use_id, oneshot sender>`：
+`execute()` 在 `ctx.tool_use_id` 下停泊一次性通道，`resolve()`
+按该 id 触发（src/tools.rs，测试
+`pending_tool_resolves_after_host_reply`）。
 
 ## 4. 测试计划
 
