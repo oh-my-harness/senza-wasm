@@ -161,10 +161,17 @@ let deck = restoreDeck();
 function persist() { localStorage.setItem(LS_KEY, JSON.stringify(deck.sorted())); }
 
 function render(page) {
-  $("frame").srcdoc = buildDeckDocument(deck, page ?? 1);
+  const html = buildDeckDocument(deck, page ?? 1);
   $("pages").textContent = `${deck.slides.size} 页`;
   $("download").disabled = !deck.slides.size;
   persist();
+  const old = $("frame");
+  // 浏览器在连续快速赋值 srcdoc 时可能丢弃某次更新（实测：最后一页写入
+  // 后 iframe DOM 停在旧文档，刷新页面才能看到 →「生成完却看不到」）。
+  // 重建 iframe 元素是最可靠的强制重载方式。
+  const fresh = old.cloneNode(false);
+  old.replaceWith(fresh);
+  fresh.srcdoc = html;
 }
 render(1);
 
