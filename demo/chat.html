@@ -16,6 +16,10 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="icon" href="data:," />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"
+      integrity="sha384-nB0miv6/jRmo5UMMR1wu3Gz6NLsoTkbqJghGIsx//Rlm+ZU03BU6SQNC66uf4l5+" crossorigin="anonymous" />
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"
+        integrity="sha384-7zkQWkzuo3B5mTepMUcHkMB5jZaolc2xDwL6VFqjFALcbeS9Ggm/Yr2r3Dy4lfFg" crossorigin="anonymous"></script>
 <title>senza-wasm · browser agent</title>
 <style>
   * { box-sizing: border-box; }
@@ -215,21 +219,46 @@ function esc(s) {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 function inlineMd(s) {
-  // `code`、**bold**、*italic*、~~del~~、[t](url)、autolink —— 顺序敏感
+  // `code`、**bold**、*italic*、~~del~~、[t](url)、autolink、数学 —— 顺序敏感
   let out = "", i = 0, rest = esc(s);
   const re = /(`[^`\n]+`)|(\*\*[^*]+\*\*)|(~~[^~]+~~)|(\*[^*\s][^*]*\*)|(\[([^\]]+)\]\(([^)\s]+)\))|(https?:\/\/[^\s<>)]+)/g;
   // 逐段：先按 `code` 切分（code 内不解析其余标记），其余段跑行内规则
   const parts = rest.split(/(`[^`]+`)/g);
   for (const p of parts) {
     if (p.startsWith("`") && p.endsWith("`") && p.length > 2) { out += "<code>" + p.slice(1, -1) + "</code>"; continue; }
-    out += p
+    out += renderInlineMath(p
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>")
       .replace(/~~([^~]+)~~/g, "<del>$1</del>")
       .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-      .replace(/(^|[\s(])((?:https?:\/\/)[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+      .replace(/(^|[\s(])((?:https?:\/\/)[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>'));
   }
   return out;
+}
+// 行内数学：$..$ 与 \(..\)（KaTeX 不在或渲染失败 → 原样返回）
+function renderInlineMath(html) {
+  return html.replace(
+    /(\$\$[\s\S]+?\$\$)|(\$[^\s$][^\n$]*?\$)|(\\\(([\s\S]+?)\\\))|(\\\[([\s\S]+?)\\\])/g,
+    (m, dd, d, pl, plainP, br, plainB) => {
+      let tex, display;
+      if (dd) { tex = dd.slice(2, -2); display = true; }
+      else if (d) {
+        // 货币误判防护：$5$ 这种两侧紧贴数字的当钱处理；首尾去空白
+        tex = d.slice(1, -1); display = false;
+        if (/^\d[\d.,\s]*\d$|^\d$/.test(tex.trim())) return m;
+      }
+      else if (plainP != null) { tex = plainP; display = false; }
+      else { tex = plainB; display = true; }
+      if (!tex.trim()) return m;
+      try {
+        return katex.renderToString(unescapeMd(tex), { displayMode: display, throwOnError: false });
+      } catch { return m; }
+    });
+}
+// esc() 转义过的实体还原回 TeX 源码
+function unescapeMd(s) {
+  return s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+          .replace(/&quot;/g, '"').replace(/&#39;/g, "'");
 }
 function mdToHtml(src) {
   const lines = src.replace(/\r\n?/g, "\n").split("\n");
