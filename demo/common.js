@@ -32,19 +32,32 @@ export function bindSettings(fieldIds, onChange) {
   const el = (k) => document.getElementById(fieldIds[k]);
   el("baseurl").value = cfg.baseUrl || "https://api.deepseek.com/v1";
   el("apikey").value = cfg.apiKey || "";
-  el("model").value = cfg.model || "deepseek-v4-flash";
+  // 旧版本存过的过时默认模型 → 视为未配置，回落新默认
+  const STALE = new Set(["gpt-4o-mini", "deepseek-chat"]);
+  el("model").value = cfg.model && !STALE.has(cfg.model) ? cfg.model : "deepseek-v4-flash";
+  // preset → 联动 base url + 该端点的默认模型
+  const PRESET_DEFAULT_MODEL = {
+    "https://api.anthropic.com": "claude-sonnet-4-5",
+    "https://api.deepseek.com/v1": "deepseek-v4-flash",
+    "https://api.openai.com/v1": "gpt-4o-mini",
+  };
   el("preset").onchange = () => {
     const u = el("preset").value;
-    if (u) el("baseurl").value = u;
+    if (u) {
+      el("baseurl").value = u;
+      if (PRESET_DEFAULT_MODEL[u]) el("model").value = PRESET_DEFAULT_MODEL[u];
+    }
     el("baseurl").focus();
   };
-  for (const k of ["baseurl", "apikey", "model"])
-    el(k).addEventListener("change", () => {
-      saveCfg({
-        baseUrl: el("baseurl").value.trim(),
-        apiKey: el("apikey").value.trim(),
-        model: el("model").value.trim() || "deepseek-v4-flash",
-      });
-      onChange?.();
+  const persist = () => {
+    saveCfg({
+      provider: (el("baseurl").value || "").includes("anthropic") ? "anthropic" : "openai",
+      baseUrl: el("baseurl").value.trim(),
+      apiKey: el("apikey").value.trim(),
+      model: el("model").value.trim() || "deepseek-v4-flash",
     });
+    onChange?.();
+  };
+  for (const k of ["baseurl", "apikey", "model"])
+    el(k).addEventListener("change", persist);
 }
