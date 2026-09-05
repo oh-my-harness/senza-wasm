@@ -12,9 +12,12 @@ use futures::StreamExt;
 use parking_lot::Mutex;
 use wasm_bindgen::prelude::*;
 
-use llm_harness_loop::{DefaultConvertToLlm, FinalAnswerMode, LoopConfig, agent_loop};
+use llm_harness_loop::{
+    DefaultConvertToLlm, FinalAnswerMode, LoopConfig, ResponseFormat, agent_loop,
+};
 use llm_harness_types::{
-    AgentContext, AgentEvent, RunContext, RunRequest, StreamOptions, Tool, ToolExecutionMode,
+    AgentContext, AgentEvent, RunContext, RunRequest, StreamOptions, ThinkingLevel, Tool,
+    ToolExecutionMode,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -36,6 +39,25 @@ pub(crate) struct AgentState {
     /// Pump tools by name; `resolve_tool` routes via PendingTool::resolve
     /// (keyed by the LLM-assigned tool_use_id, not a facade uuid).
     pub pump_by_name: std::collections::HashMap<String, Arc<crate::tools::PendingTool>>,
+    /// Lifetime token totals (M2 spec §3.2). Not reset by clear/import —
+    /// cost is process-lifetime diagnostics, conversation state is not.
+    pub cost: CostState,
+    /// message_ids already counted into `cost` (dedup across
+    /// MessageEnd/TurnEnd projections of the same assistant message).
+    pub cost_seen: std::collections::HashSet<String>,
+}
+
+/// Facade-owned token accumulator (M2 spec §3.2). Deliberately NOT the
+/// kernel `CostAggregate`: no price tables on the facade — hosts compute
+/// money from raw tokens themselves.
+#[derive(Default)]
+pub(crate) struct CostState {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    reasoning_tokens: u64,
+    provider_calls: u64,
 }
 
 impl AgentState {
@@ -48,6 +70,8 @@ impl AgentState {
             history: Vec::new(),
             generation: 0,
             pump_by_name: std::collections::HashMap::new(),
+            cost: CostState::default(),
+            cost_seen: std::collections::HashSet::new(),
         }
     }
 }
@@ -60,6 +84,24 @@ struct AgentDeps {
     temperature: Option<f32>,
     system_prompt: Option<String>,
     max_turns: u32,
+    response_format: Option<ResponseFormat>,
+    final_answer_mode: FinalAnswerMode,
+    stream_idle_timeout_ms: u64,
+    thinking_level: ThinkingLevel,
+}
+
+/// Owned copy of `AgentDeps` taken per run (the loop task is `async move`,
+/// so borrows of `&self.deps` cannot escape `prompt(&self)`).
+struct AgentDepsSnapshot {
+    model: String,
+    max_tokens: u32,
+    temperature: Option<f32>,
+    system_prompt: Option<String>,
+    max_turns: u32,
+    response_format: Option<ResponseFormat>,
+    final_answer_mode: FinalAnswerMode,
+    stream_idle_timeout_ms: u64,
+    thinking_level: ThinkingLevel,
 }
 
 #[wasm_bindgen]
@@ -70,7 +112,7 @@ pub struct EmbeddedAgent {
 
 /// One preset in a mock conversation script (constructor JSON only;
 /// not part of the public API surface).
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Debug)]
 #[serde(
     tag = "kind",
     rename_all = "snake_case",
@@ -79,6 +121,10 @@ pub struct EmbeddedAgent {
 enum MockSpec {
     Text {
         text: String,
+        /// Optional provider-reported usage (M2 spec §4): feeds
+        /// cost_snapshot tests via `with_reported_usage`.
+        #[serde(default)]
+        usage: Option<MockUsage>,
     },
     ToolUse {
         tool_use_id: String,
@@ -88,8 +134,37 @@ enum MockSpec {
     RateLimitError,
 }
 
+/// camelCase token-usage payload on mockScript text entries.
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+struct MockUsage {
+    #[serde(default)]
+    input_tokens: u32,
+    #[serde(default)]
+    output_tokens: u32,
+    #[serde(default)]
+    cached_input_tokens: u32,
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
+    #[serde(default)]
+    reasoning_tokens: u32,
+}
+
+impl From<MockUsage> for llm_adapter::types::Usage {
+    fn from(u: MockUsage) -> Self {
+        Self {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            cached_input_tokens: u.cached_input_tokens,
+            cache_creation_input_tokens: u.cache_creation_input_tokens,
+            reasoning_tokens: u.reasoning_tokens,
+            provenance: Default::default(),
+        }
+    }
+}
+
 /// Options accepted by `createAgent` (JSON string).
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Debug)]
 struct AgentOpts {
     /// `mock` (test facade) or `openai`.
     #[serde(default = "default_provider")]
@@ -107,14 +182,120 @@ struct AgentOpts {
     max_turns: u32,
     #[serde(default)]
     temperature: Option<f32>,
+    /// Structured output request (M2 spec §3.1). Mock provider ignores it.
+    #[serde(default, rename = "responseFormat")]
+    response_format: Option<FacadeResponseFormat>,
+    /// `"heuristic" | "required_tool" | "tool_with_text_fallback"` (default heuristic).
+    #[serde(default, rename = "finalAnswerMode")]
+    final_answer_mode: FacadeFinalAnswerMode,
+    /// Idle watchdog per turn, ms (default 5000).
+    #[serde(
+        default = "default_stream_idle_timeout_ms",
+        rename = "streamIdleTimeoutMs"
+    )]
+    stream_idle_timeout_ms: u64,
+    /// `"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "budget:N"`.
+    #[serde(
+        default,
+        rename = "thinkingLevel",
+        deserialize_with = "parse_thinking_level"
+    )]
+    thinking_level: Option<ThinkingLevel>,
     /// Mock conversation script (provider "mock" only). Consumed in
     /// order; after exhaustion the mock falls back to plain EndTurn text.
     #[serde(default, rename = "mockScript")]
     mock_script: Option<Vec<MockSpec>>,
 }
 
+/// `responseFormat` (M2 spec §3.1) — mirrors the kernel `ResponseFormat`.
+#[derive(serde::Deserialize, Debug)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+enum FacadeResponseFormat {
+    JsonObject,
+    JsonSchema {
+        name: String,
+        schema: serde_json::Value,
+        strict: Option<bool>,
+    },
+}
+
+impl From<FacadeResponseFormat> for ResponseFormat {
+    fn from(f: FacadeResponseFormat) -> Self {
+        match f {
+            FacadeResponseFormat::JsonObject => ResponseFormat::JsonObject,
+            FacadeResponseFormat::JsonSchema {
+                name,
+                schema,
+                strict,
+            } => ResponseFormat::JsonSchema {
+                name,
+                schema,
+                strict,
+            },
+        }
+    }
+}
+
+/// `finalAnswerMode` (M2 spec §3.1).
+#[derive(serde::Deserialize, Default, Clone, Copy, PartialEq, Debug)]
+#[serde(rename_all = "snake_case")]
+enum FacadeFinalAnswerMode {
+    #[default]
+    Heuristic,
+    RequiredTool,
+    ToolWithTextFallback,
+}
+
+impl From<FacadeFinalAnswerMode> for FinalAnswerMode {
+    fn from(m: FacadeFinalAnswerMode) -> Self {
+        match m {
+            FacadeFinalAnswerMode::Heuristic => FinalAnswerMode::Heuristic,
+            FacadeFinalAnswerMode::RequiredTool => FinalAnswerMode::required_tool(),
+            FacadeFinalAnswerMode::ToolWithTextFallback => {
+                FinalAnswerMode::tool_with_text_fallback()
+            }
+        }
+    }
+}
+
+/// `thinkingLevel` — `"off" | "minimal" | "low" | "medium" | "high" |
+/// "xhigh" | "budget:N"` (kernel variants at llm-api-adapter
+/// types/thinking.rs:18).
+fn parse_thinking_level<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<ThinkingLevel>, D::Error> {
+    let s: Option<String> = serde::Deserialize::deserialize(d)?;
+    let Some(s) = s else { return Ok(None) };
+    let lvl = match s.as_str() {
+        "off" => ThinkingLevel::Off,
+        "minimal" => ThinkingLevel::Minimal,
+        "low" => ThinkingLevel::Low,
+        "medium" => ThinkingLevel::Medium,
+        "high" => ThinkingLevel::High,
+        "xhigh" => ThinkingLevel::XHigh,
+        other => {
+            if let Some(n) = other.strip_prefix("budget:") {
+                let n: u32 = n.parse().map_err(serde::de::Error::custom)?;
+                ThinkingLevel::Budget(n)
+            } else {
+                return Err(serde::de::Error::custom(format!(
+                    "invalid thinkingLevel '{other}' (expected off|minimal|low|medium|high|xhigh|budget:N)"
+                )));
+            }
+        }
+    };
+    Ok(Some(lvl))
+}
+
 fn default_provider() -> String {
     "openai".into()
+}
+fn default_stream_idle_timeout_ms() -> u64 {
+    5000
 }
 fn default_max_tokens() -> u32 {
     4096
@@ -134,6 +315,10 @@ impl EmbeddedAgent {
                 temperature: opts.temperature,
                 system_prompt: opts.system_prompt,
                 max_turns: opts.max_turns,
+                response_format: opts.response_format.map(Into::into),
+                final_answer_mode: opts.final_answer_mode.into(),
+                stream_idle_timeout_ms: opts.stream_idle_timeout_ms,
+                thinking_level: opts.thinking_level.unwrap_or(ThinkingLevel::Off),
             },
         }
     }
@@ -161,8 +346,12 @@ impl EmbeddedAgent {
                     .unwrap_or_default()
                     .into_iter()
                     .map(|spec| match spec {
-                        MockSpec::Text { text } => {
-                            llm_harness_loop::test_utils::MockResponse::text(&text)
+                        MockSpec::Text { text, usage } => {
+                            let resp = llm_harness_loop::test_utils::MockResponse::text(&text);
+                            match usage {
+                                Some(u) => resp.with_reported_usage(u.into()),
+                                None => resp,
+                            }
                         }
                         MockSpec::ToolUse {
                             tool_use_id,
@@ -234,20 +423,18 @@ impl EmbeddedAgent {
 
     /// Start one run with `text` as the user message. Returns immediately;
     /// drain events with `poll()`. The conversation continues: the loop
-    /// receives `history + [user msg]` — the kernel's `agent_loop` does NOT
-    /// read `config.run.initial_messages` (harness-layer responsibility,
-    /// see M1 spec §1), so the caller must inject into ctx.
     pub fn prompt(&self, text: String) {
-        let (client, model, max_tokens, temperature, system_prompt, max_turns) = {
-            let d = &self.deps;
-            (
-                d.client.clone(),
-                d.model.clone(),
-                d.max_tokens,
-                d.temperature,
-                d.system_prompt.clone(),
-                d.max_turns,
-            )
+        let client = self.deps.client.clone();
+        let deps = AgentDepsSnapshot {
+            model: self.deps.model.clone(),
+            max_tokens: self.deps.max_tokens,
+            temperature: self.deps.temperature,
+            thinking_level: self.deps.thinking_level,
+            final_answer_mode: self.deps.final_answer_mode.clone(),
+            response_format: self.deps.response_format.clone(),
+            stream_idle_timeout_ms: self.deps.stream_idle_timeout_ms,
+            system_prompt: self.deps.system_prompt.clone(),
+            max_turns: self.deps.max_turns,
         };
         let state = self.state.clone();
         let mut guard = state.lock();
@@ -274,22 +461,14 @@ impl EmbeddedAgent {
         let tools = guard.tools.clone();
         let abort = guard.abort.clone();
         drop(guard);
-
         wasm_bindgen_futures::spawn_local(async move {
             // Metadata only; the kernel loop ignores initial_messages.
             let request = RunRequest::default();
             let ctx = AgentContext {
-                system_prompt,
+                system_prompt: deps.system_prompt.clone(),
                 messages: history, // history + [user_msg] — the injection fix
             };
-            let config = build_config(
-                &request,
-                &model,
-                max_tokens,
-                temperature,
-                tools,
-                abort.clone(),
-            );
+            let config = build_config(&request, &deps, tools, abort.clone());
             let stream = agent_loop(client, ctx, config);
             futures::pin_mut!(stream);
             let mut turns_started = 0u32;
@@ -300,16 +479,36 @@ impl EmbeddedAgent {
             while let Some(event) = stream.next().await {
                 if matches!(event, AgentEvent::TurnStart { .. }) {
                     turns_started += 1;
-                    if turns_started > max_turns {
+                    if turns_started > deps.max_turns {
                         state.lock().queue.push(
                             serde_json::json!({
                                 "type": "error",
-                                "message": format!("max_turns ({max_turns}) exceeded; aborting"),
+                                "message": format!("max_turns ({}) exceeded; aborting", deps.max_turns),
                                 "error_type": "resource_limit",
                             })
                             .to_string(),
                         );
                         abort.cancel();
+                    }
+                }
+                if let AgentEvent::MessageEnd {
+                    message_id,
+                    message,
+                    ..
+                } = &event
+                {
+                    // Dedup by message_id: the same assistant message can be
+                    // projected by MessageEnd and TurnEnd; count once.
+                    if let Some(usage) = &message.usage {
+                        let mut st = state.lock();
+                        if st.cost_seen.insert(message_id.clone()) {
+                            st.cost.input_tokens += u64::from(usage.input_tokens);
+                            st.cost.output_tokens += u64::from(usage.output_tokens);
+                            st.cost.cache_read_tokens += u64::from(usage.cache_read_tokens);
+                            st.cost.cache_write_tokens += u64::from(usage.cache_creation_tokens);
+                            st.cost.reasoning_tokens += u64::from(usage.reasoning_tokens);
+                            st.cost.provider_calls += 1;
+                        }
                     }
                 }
                 if let AgentEvent::AgentEnd { new_messages } = &event {
@@ -435,6 +634,24 @@ impl EmbeddedAgent {
         Ok(())
     }
 
+    /// Cumulative token usage as JSON (M2 spec §3.2):
+    /// `{"totalInputTokens":…,"totalOutputTokens":…,"totalCacheReadTokens":…,
+    /// "totalCacheWriteTokens":…,"totalReasoningTokens":…,"providerCalls":…}`.
+    /// Lifetime totals — clearSession does NOT reset them.
+    #[wasm_bindgen(js_name = costSnapshot)]
+    pub fn cost_snapshot(&self) -> String {
+        let st = self.state.lock();
+        serde_json::json!({
+            "totalInputTokens": st.cost.input_tokens,
+            "totalOutputTokens": st.cost.output_tokens,
+            "totalCacheReadTokens": st.cost.cache_read_tokens,
+            "totalCacheWriteTokens": st.cost.cache_write_tokens,
+            "totalReasoningTokens": st.cost.reasoning_tokens,
+            "providerCalls": st.cost.provider_calls,
+        })
+        .to_string()
+    }
+
     /// Clear history. Does not interrupt a running run; the in-flight
     /// writeback is discarded via the generation counter.
     #[wasm_bindgen(js_name = clearSession)]
@@ -451,9 +668,7 @@ impl EmbeddedAgent {
 /// kernel's futures-timer bridge on every turn).
 fn build_config(
     request: &RunRequest,
-    model: &str,
-    max_tokens: u32,
-    temperature: Option<f32>,
+    deps: &AgentDepsSnapshot,
     tools: Vec<Arc<dyn llm_harness_types::Tool>>,
     abort: CancellationToken,
 ) -> LoopConfig {
@@ -462,18 +677,18 @@ fn build_config(
             initial_messages: request.initial_messages.clone(),
             extensions: llm_harness_types::RunExtensions::new(),
         })),
-        model: model.to_string(),
-        max_tokens,
-        temperature,
-        thinking_level: llm_harness_types::ThinkingLevel::Off,
+        model: deps.model.clone(),
+        max_tokens: deps.max_tokens,
+        temperature: deps.temperature,
+        thinking_level: deps.thinking_level,
         tools,
         active_tools: None,
         default_execution_mode: ToolExecutionMode::Parallel,
-        final_answer_mode: FinalAnswerMode::default(),
+        final_answer_mode: deps.final_answer_mode.clone(),
         env: Arc::new(llm_harness_loop::test_utils::NoOpEnv),
         abort,
         stream_options: StreamOptions {
-            stream_idle_timeout_ms: Some(5000),
+            stream_idle_timeout_ms: Some(deps.stream_idle_timeout_ms),
             ..StreamOptions::default()
         },
         convert_to_llm: Arc::new(DefaultConvertToLlm::new()),
@@ -487,7 +702,7 @@ fn build_config(
         steer_rx: None,
         follow_up_rx: None,
         retry: None,
-        response_format: None,
+        response_format: deps.response_format.clone(),
     }
 }
 
@@ -625,5 +840,63 @@ mod tests {
             saw_end,
             "run must terminate (agent_end) after the guard fires"
         );
+    }
+
+    /// M2: mockScript usage injection + cost_snapshot accumulation across
+    /// two turns, with message_id dedup (MessageEnd counts once even though
+    /// TurnEnd re-projects the same message).
+    #[wasm_bindgen_test]
+    async fn cost_snapshot_accumulates_across_turns() {
+        let agent = EmbeddedAgent::new(
+            r#"{"provider":"mock","model":"m","mockScript":[
+                {"kind":"text","text":"a","usage":{"inputTokens":10,"outputTokens":5}},
+                {"kind":"text","text":"b","usage":{"inputTokens":7,"outputTokens":3,"cachedInputTokens":4,"reasoningTokens":2}}
+            ]}"#
+            .into(),
+        )
+        .unwrap();
+        agent.prompt("one".into());
+        drain_to_end(&agent).await;
+        agent.prompt("two".into());
+        drain_to_end(&agent).await;
+
+        let snap: serde_json::Value = serde_json::from_str(&agent.cost_snapshot()).unwrap();
+        assert_eq!(snap["totalInputTokens"], 17, "10 + 7");
+        assert_eq!(snap["totalOutputTokens"], 8, "5 + 3");
+        assert_eq!(snap["totalCacheReadTokens"], 4);
+        assert_eq!(snap["totalCacheWriteTokens"], 0);
+        assert_eq!(snap["totalReasoningTokens"], 2);
+        assert_eq!(snap["providerCalls"], 2, "one per assistant message");
+    }
+
+    /// M2: options parse — responseFormat/finalAnswerMode/thinkingLevel/
+    /// streamIdleTimeoutMs all reach AgentOpts (pinned against the
+    /// camelCase-silent-ignore class of bug from M1).
+    #[wasm_bindgen_test]
+    fn m2_options_parse_and_passthrough() {
+        let opts = parse_opts(
+            r#"{"provider":"mock","model":"m",
+                "responseFormat":{"kind":"json_schema","name":"out","schema":{"type":"object"},"strict":true},
+                "finalAnswerMode":"required_tool",
+                "thinkingLevel":"budget:1024",
+                "streamIdleTimeoutMs":9000}"#
+                .into(),
+        )
+        .unwrap();
+        assert!(matches!(
+            opts.response_format,
+            Some(FacadeResponseFormat::JsonSchema { .. })
+        ));
+        assert_eq!(opts.final_answer_mode, FacadeFinalAnswerMode::RequiredTool);
+        assert!(matches!(
+            opts.thinking_level,
+            Some(ThinkingLevel::Budget(1024))
+        ));
+        assert_eq!(opts.stream_idle_timeout_ms, 9000);
+
+        // invalid thinkingLevel must be a parse error, not a silent default
+        let err = parse_opts(r#"{"provider":"mock","model":"m","thinkingLevel":"bogus"}"#.into())
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("thinkingLevel"), "got: {err:?}");
     }
 }

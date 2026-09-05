@@ -146,6 +146,51 @@ async function main() {
   }
   assert(sawLimit, "max_turns guard fired (no resource_limit error seen)");
   console.log("ERROR PATHS PASS");
-}
+
+  // --- M2: finalAnswerMode=required_tool — plain text terminal turn
+  // (no final_answer tool call) must surface an error event ---
+  const agent7 = new EmbeddedAgent(JSON.stringify({
+    provider: "mock",
+    model: "mock-model",
+    finalAnswerMode: "required_tool",
+    mockScript: [{ kind: "text", text: "just text, no tool call" }],
+  }));
+  agent7.prompt("go");
+  let sawFinalAnswerErr = false;
+  for (let i = 0; i < 400 && !sawFinalAnswerErr; i++) {
+    await new Promise((r) => setTimeout(r, 25));
+    for (const l of agent7.poll()) {
+      const ev = JSON.parse(l);
+      if (ev.type === "error" && /final/i.test(ev.message ?? "")) sawFinalAnswerErr = true;
+    }
+  }
+  assert(sawFinalAnswerErr,
+    "required_tool mode must reject a plain-text terminal turn");
+  console.log("FINAL ANSWER MODE PASS");
+
+  // --- M2: costSnapshot accumulates (mockScript usage injection) ---
+  const agent8 = new EmbeddedAgent(JSON.stringify({
+    provider: "mock",
+    model: "mock-model",
+    mockScript: [
+      { kind: "text", text: "a", usage: { inputTokens: 10, outputTokens: 5 } },
+      { kind: "text", text: "b", usage: { inputTokens: 7, outputTokens: 3 } },
+    ],
+  }));
+  agent8.prompt("one");
+  for (let i = 0; i < 400; i++) {
+    await new Promise((r) => setTimeout(r, 25));
+    if (agent8.poll().some((l) => l.includes('"agent_end"'))) break;
+  }
+  agent8.prompt("two");
+  for (let i = 0; i < 400; i++) {
+    await new Promise((r) => setTimeout(r, 25));
+    if (agent8.poll().some((l) => l.includes('"agent_end"'))) break;
+  }
+  const cost = JSON.parse(agent8.costSnapshot());
+  assert(cost.totalInputTokens === 17 && cost.totalOutputTokens === 8 && cost.providerCalls === 2,
+    "costSnapshot totals: " + JSON.stringify(cost));
+  console.log("COST SNAPSHOT PASS");
+ }
 
 await main();
