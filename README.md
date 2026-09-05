@@ -137,8 +137,9 @@ loop 仍会紧随其后以 `agent_end` 收尾（内核契约）——半轮内�
 内存里，不经过任何服务器。本地跑同款：`wasm-pack build --target
 web --out-dir pkg-web && python3 -m http.server` 后开 `demo/index.html`。
 
-现有三个 demo：**chat**（多轮对话 + 审批门）、**vale**（agent 改写游戏世界）、
-**deck**（对话生成 HTML PPT，实时预览 + 下载自包含文件）。
+现有四个 demo：**chat**（多轮对话 + 审批门）、**vale**（agent 改写游戏世界）、
+**deck**（对话生成 HTML PPT，实时预览 + 下载自包含文件）、
+**undercover**（谁是卧底：多 agent 同场、独立 session、信息物理隔离）。
 
 ## 测试门面（mock provider）
 
@@ -177,6 +178,8 @@ tests/node_smoke.mjs       # Node 冒烟：完整 mock 轮次、事件序列断�
 tests/node_multi_turn.mjs  # 多轮：mock 脚本、历史续接、
                            # pump + 闭包工具、错误路径（进 CI）
 tests/node_deck.mjs        # deck demo 冒烟：Deck 模型、工具大纲回显、文档组装器（进 CI）
+tests/node_undercover.mjs  # 谁是卧底 demo 冒烟：词库/票型/胜负/状态机、
+                           # speak/vote 工具多轮 session（进 CI）
 tests/browser_smoke.html   # 浏览器手动门（web 目标）
 docs/superpowers/          # spec + 实施计划
 npm/                       # 封装层 + 手写 .d.ts（M2）

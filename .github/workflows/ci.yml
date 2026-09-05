@@ -54,3 +54,4 @@ jobs:
       - run: node tests/node_smoke.mjs
       - run: node tests/node_multi_turn.mjs
       - run: node tests/node_deck.mjs
+      - run: node tests/node_undercover.mjs

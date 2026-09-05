@@ -277,6 +277,8 @@ function makeGameAgent(seat) {
 function pumpAgent(seat, onTool, onDone) {
   const a = agents[seat];
   const pending = new Map();
+  // args 事件字段已是解析后的对象（serde_json::Value），不是 JSON 字符串
+  const asObject = (args) => typeof args === "string" ? JSON.parse(args) : args;
   let active = true;
   busyCount++; $("busy").classList.add("on");
   (async () => {
@@ -289,7 +291,7 @@ function pumpAgent(seat, onTool, onDone) {
         if (ev.type === "agent_start") active = true;
         // 参数在 start 事件上；end 只有 tool_use_id —— 按 id 配对
         if (ev.type === "tool_execution_start")
-          pending.set(ev.tool_use_id, { name: ev.tool_name, args: ev.args ?? "" });
+          pending.set(ev.tool_use_id, { name: ev.tool_name, args: asObject(ev.args ?? {}) });
         if (ev.type === "tool_execution_end" && ev.ok) {
           const info = pending.get(ev.tool_use_id);
           pending.delete(ev.tool_use_id);
@@ -358,15 +360,11 @@ async function nextSpeakerStep() {
   agents[seat].prompt(prompt);
 
   pumpAgent(seat, (name, args) => {
-    if (name === "speak") {
-      // args 是工具调用参数 JSON —— 真正的发言内容
-      try {
-        const statement = JSON.parse(args).statement;
-        spokeThisTurn.delete(seat);
-        recordSpeech(st, seat, statement);
-        setBubble(seat, statement);
-        logLine("sys", `${NAMES[seat]}：${statement}`);
-      } catch (e) { logLine("err", `${NAMES[seat]} 发言解析失败: ${e}`); }
+    if (name === "speak" && args?.statement) {
+      spokeThisTurn.delete(seat);
+      recordSpeech(st, seat, args.statement);
+      setBubble(seat, args.statement);
+      logLine("sys", `${NAMES[seat]}：${args.statement}`);
     }
   }, () => nextSpeakerStep());
 }
@@ -413,12 +411,16 @@ function enterVoting() {
       `现在投票。可投：${others}。调用 vote 工具，target 填玩家代号。`);
     pumpAgent(seat, (name, args) => {
       if (name === "vote") {
-        try {
-          const target = JSON.parse(args).target;
-          const t = alive.find((x) => x.name === target || String(x.seat) === target);
-          if (t) castVote(seat, t.seat);
-          else logLine("err", `${NAMES[seat]} 投了无效目标「${target}」，弃票`);
-        } catch (e) { logLine("err", `${NAMES[seat]} 投票解析失败: ${e}`); }
+        const target = args?.target;
+        const t = alive.find((x) => x.name === target || String(x.seat) === target);
+        if (t) castVote(seat, t.seat);
+        else logLine("err", `${NAMES[seat]} 投了无效目标「${target}」，弃票`);
+      }
+    }, () => {
+      // pump 收尾仍没投出票（没调工具/无效目标）→ 弃票，避免卡死
+      if (!voted.has(seat)) {
+        logLine("err", `${NAMES[seat]} 弃票`);
+        abstainVote(seat);
       }
     });
   }
@@ -433,6 +435,13 @@ function castVote(from, to) {
   seatEl(to).classList.add("voted");
   setTimeout(() => seatEl(to).classList.remove("voted"), 800);
   logLine("vote", `${NAMES[from]} → ${NAMES[to]}`);
+  if (Object.keys(st.votes).length >= st.speakTotal) resolveVotes();
+}
+
+/** 弃票：按票数 0 记入票池（tallyVotes 只统计被投过的 seat，天然不计票）。 */
+function abstainVote(seat) {
+  recordVote(st, seat, -1); // -1 = 无人，tallyVotes 不计入任何 seat
+  voted.add(seat);
   if (Object.keys(st.votes).length >= st.speakTotal) resolveVotes();
 }
 
@@ -458,9 +467,10 @@ function resolveVotes() {
   if (over) return endGame(over);
 
   // 下一轮：从出局者的下一位存活者起（简化：固定从 seat 顺序找第一个存活）
-  st = newRoundState(players, alivePlayers[0].seat);
+  st = newRoundState(players, alivePlayers[0].seat, st.round + 1);
   st.phase = "speaking";
   voted.clear();
+  spokeThisTurn.clear();
   for (const p of players) setBubble(p.seat, ""); // 清空气泡，新一轮
   setTimeout(() => nextSpeakerStep(), 900);
 }

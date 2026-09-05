@@ -42,6 +42,7 @@ export function dealWords(players, pair, undercoverSeat) {
 export function tallyVotes(votes) {
   const counts = new Map();
   for (const target of Object.values(votes)) {
+    if (target === -1) continue; // 弃票哨兵：不计入任何 seat
     counts.set(target, (counts.get(target) ?? 0) + 1);
   }
   if (!counts.size) return { counts, maxSeats: [], tie: false, eliminated: null };
@@ -79,12 +80,12 @@ export function checkGameOver(aliveCount, undercoverAlive) {
  * - speakIdx: speaking 阶段的座位指针（沿 aliveOrder 前进）
  * - speechs: 本轮各座位发言（seat → 文本），轮到某人前包含此前所有发言
  */
-export function newRoundState(players, firstSpeaker) {
+export function newRoundState(players, firstSpeaker, round = 1) {
   const aliveOrder = players.filter((p) => p.alive).map((p) => p.seat);
   const idx = Math.max(0, aliveOrder.indexOf(firstSpeaker));
   return {
     phase: "dealing",
-    round: 1,
+    round,
     aliveOrder,
     speakIdx: idx,
     speechs: {},
