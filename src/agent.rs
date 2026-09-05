@@ -411,6 +411,13 @@ impl EmbeddedAgent {
                 if let Some(url) = &opts.base_url {
                     builder = builder.base_url(normalize_openai_base(url));
                 }
+                // 解析 reasoning_content（DeepSeek/硅基流动等推理模型）：
+                // 1) reasoning 阶段的每个 chunk 产出 ReasoningDelta，持续重臂
+                //    stream idle watchdog——否则推理模型思考 >60s 会被误杀
+                //    （watchdog 只在解析出事件时重臂，被丢弃的 reasoning chunk
+                //    对它不可见）；
+                // 2) UI 能实时显示思考过程，而不是干等。
+                builder = builder.parse_reasoning_content(true);
                 let client: Arc<dyn llm_adapter::provider::Provider> = Arc::new(builder.build());
                 Ok(Self::new_with_client(client, opts))
             }
