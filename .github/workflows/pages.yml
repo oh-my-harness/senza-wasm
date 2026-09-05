@@ -11,6 +11,8 @@ on:
     paths: ["demo/**", "src/**", "Cargo.toml", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 permissions:
   contents: read
   pages: write
@@ -28,8 +30,18 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      # 内核依赖 llm-harness-runtime（私有）—— 用 GITHUB_TOKEN 拉取
-      - run: git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      # 内核依赖 llm-harness-runtime（私有）—— PAT 拉取（同 Folumi 模式）
+      - name: Configure private Git dependencies
+        env:
+          PRIVATE_DEPS_TOKEN: ${{ secrets.PRIVATE_DEPS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PRIVATE_DEPS_TOKEN:-}" ]]; then
+            echo "::error title=Missing PRIVATE_DEPS_TOKEN::Create a repository secret named PRIVATE_DEPS_TOKEN with read access to private git dependencies such as oh-my-harness/llm-harness-runtime."
+            exit 1
+          fi
+          echo "::add-mask::${PRIVATE_DEPS_TOKEN}"
+          git config --global url."https://x-access-token:${PRIVATE_DEPS_TOKEN}@github.com/".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
