@@ -88,23 +88,20 @@
   <h1><a href="index.html">←</a> senza-wasm <small>· deck</small></h1>
   <div id="settings">
     <details>
-      <summary>⚙ API 设置</summary>
-      <label>预设（OpenAI 兼容端点）</label>
+      <label>预设（LLM 端点）</label>
       <select id="preset">
-        <option value="https://api.openai.com/v1" selected>OpenAI 官方</option>
-        <option value="https://api.deepseek.com/v1">DeepSeek</option>
-        <option value="https://api.moonshot.cn/v1">Moonshot (Kimi)</option>
-        <option value="https://ark.cn-beijing.volces.com/api/v3">火山方舟</option>
-        <option value="https://open.bigmodel.cn/api/paas/v4">智谱 GLM</option>
+        <option value="https://api.deepseek.com/v1" selected>DeepSeek（默认，便宜好用）</option>
+        <option value="https://api.openai.com/v1">OpenAI 官方</option>
+        <option value="https://api.anthropic.com">Anthropic 官方（Claude）</option>
         <option value="http://localhost:11434/v1">Ollama 本地</option>
         <option value="">自定义…</option>
       </select>
-      <label>API base URL（留空 = 官方端点）</label>
-      <input id="baseurl" placeholder="https://api.openai.com/v1" />
+      <label>API base URL（留空 = DeepSeek 默认）</label>
+      <input id="baseurl" placeholder="https://api.deepseek.com/v1" />
       <label>API key（只存你浏览器 localStorage）</label>
       <input id="apikey" type="password" placeholder="sk-…" />
       <label>model</label>
-      <input id="model" placeholder="gpt-4o-mini" />
+      <input id="model" placeholder="deepseek-v4-flash" />
       <p class="note">配置全组 demo 共享；换端点/模型后本页会话重开（deck 保留）。</p>
     </details>
   </div>
