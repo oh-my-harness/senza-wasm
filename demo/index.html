@@ -70,10 +70,26 @@
       <option value="openai">openai（真实模型）</option>
     </select>
     <div id="openai-box" style="display:none">
-      <label>API key（仅存于页面内存）</label>
+      <label>预设（OpenAI 兼容端点）</label>
+      <select id="preset">
+        <option value="https://api.openai.com/v1" selected>OpenAI 官方</option>
+        <option value="https://api.deepseek.com/v1">DeepSeek</option>
+        <option value="https://api.moonshot.cn/v1">Moonshot (Kimi)</option>
+        <option value="https://ark.cn-beijing.volces.com/api/v3">火山方舟</option>
+        <option value="https://open.bigmodel.cn/api/paas/v4">智谱 GLM</option>
+        <option value="http://localhost:11434/v1">Ollama 本地</option>
+        <option value="">自定义…</option>
+      </select>
+      <label>API base URL（留空 = 官方端点）</label>
+      <input id="baseurl" placeholder="https://api.openai.com/v1" />
+      <label>API key（仅存于页面内存，刷新即失）</label>
       <input id="apikey" type="password" placeholder="sk-…" />
       <label>model</label>
       <input id="model" value="gpt-4o-mini" />
+      <p style="font-size:.68rem;color:#7d8590;margin:.4rem 0 0">
+        key 只在浏览器内存 + 直连你填的端点。注意：浏览器直连需对方允许
+        CORS（OpenAI/DeepSeek 等官方 API 允许；自建网关可能要配）。
+      </p>
     </div>
     <label>mock 剧本（mock 模式下循环播放）</label>
     <textarea id="script">
@@ -143,8 +159,17 @@ function makeAgent() {
   const mock = $("mode").value === "mock";
   const opts = mock
     ? { provider: "mock", model: "mock-model", mockScript: JSON.parse($("script").value) }
-    : { provider: "openai", apiKey: $("apikey").value, model: $("model").value,
-        systemPrompt: "你是一个简洁的中文助手。需要时间就调 fetchTime，要保存内容必须调 writeNote。" };
+    : (() => {
+        if (!$("apikey").value.trim() && !$("baseurl").value.includes("localhost"))
+          throw new Error("请先填 API key（或切回 mock 模式）");
+        return {
+          provider: "openai",
+          apiKey: $("apikey").value.trim(),
+          baseUrl: $("baseurl").value.trim() || undefined,
+          model: $("model").value.trim() || "gpt-4o-mini",
+          systemPrompt: "你是一个简洁的中文助手。需要当前时间就调 fetchTime 工具；要保存内容必须调 writeNote 工具（会经用户审批）。",
+        };
+      })();
   const a = new EmbeddedAgent(JSON.stringify(opts));
 
   // 工具 1：查时间 —— 自动执行
@@ -253,18 +278,38 @@ function updateCost() {
 
 // ---------- wiring ----------
 $("mode").onchange = () => { $("openai-box").style.display = $("mode").value === "openai" ? "" : "none"; };
+$("preset").onchange = () => {
+  const url = $("preset").value;
+  if (url) $("baseurl").value = url;
+  $("baseurl").focus();
+};
+// 切换 agent 配置（模式/端点/key/model 变更）后重建 agent
+for (const id of ["mode", "preset", "baseurl", "apikey", "model"])
+  $(id).addEventListener("change", () => { agent = null; });
 
+let lastSessionJson = null;
 function ensureAgent() {
-  if (!agent) agent = makeAgent();
+  if (!agent) {
+    const keep = agent === null && lastSessionJson; // 首条消息时无历史可带
+    agent = makeAgent();
+    // 配置变更重建时，把旧会话历史迁过来（换模型续聊）
+    if (lastSessionJson) { try { agent.importSession(lastSessionJson); } catch (e) { /* 版本不符则重开 */ } }
+  }
   return agent;
 }
+setInterval(() => { if (agent) lastSessionJson = agent.exportSession(); }, 3000);
 
 $("inputbar").onsubmit = (e) => {
   e.preventDefault();
   const text = $("input").value.trim();
   if (!text) return;
+  try {
+    ensureAgent();
+  } catch (err) {
+    addMsg("error", "error", String(err.message ?? err));
+    return;
+  }
   $("input").value = "";
-  ensureAgent();
   addMsg("user", "you", text);
   agent.prompt(text);
   pump();
